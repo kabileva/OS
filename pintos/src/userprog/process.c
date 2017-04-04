@@ -17,14 +17,34 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h"
+#include "threads/malloc.h"
+
+#define MAX_ARGS 128
+
+struct args {
+  size_t argc;
+  char** argv; 
+  size_t length;
+  bool loaded;
+  struct semaphore block;
+
+};
+
 
 static thread_func start_process NO_RETURN;
-static bool load (const char *cmdline, void (**eip) (void), void **esp);
-
+static bool load (struct args* args, void (**eip) (void), void **esp);
+static struct args* parse_cmd(const char *fn_copy);
+static struct args* init_args (struct args* args);
+static void
+start_process (void *f_name);
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
+
+
+
 tid_t
 process_execute (const char *file_name) 
 {
@@ -34,23 +54,82 @@ process_execute (const char *file_name)
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
+
   if (fn_copy == NULL)
     return TID_ERROR;
+
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
+  struct args* args;
+
+  /* Initialize args and parse the command line, assign argc and argv */
+
+  args = parse_cmd(fn_copy);
+
+ 
+    /* Create a new thread to execute FILE_NAME. */
+    tid = thread_create (args->argv[0], PRI_DEFAULT, start_process, args);
+     if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+    /* waiting while loading is finished */
+    /* down the lock so that the print can work */
+    sema_down(&args->block);
+ 
+  /* deallocate memory */
+  palloc_free_page (fn_copy);
+
+  free(args->argv);
+  free(args);
+
   return tid;
+}
+
+
+
+static struct args* init_args (struct args* args) {
+  args = malloc(sizeof(struct args));
+  args->argv = malloc(sizeof(char*)*MAX_ARGS);
+  sema_init(&args->block, 0);
+  args->loaded = false;
+  args->argc = 0;
+  args->length = 0;
+  return args;
+}
+
+
+
+static struct args* parse_cmd(const char *fn_copy) {
+   struct args* args;
+   args = init_args(args);
+   char* token, *save_ptr; 
+   token = strtok_r (fn_copy, " ", &save_ptr);
+   if (args->argc < MAX_ARGS){
+    while(token != NULL) {    
+       args->argv[args->argc] = token;
+       args->argc++;
+      if (*save_ptr != '\0' || *(save_ptr - 1) == '\0') {
+         args->length += save_ptr - token;
+       }
+      else {
+        args->length += save_ptr-token+1;
+      }       
+     token = strtok_r (NULL, " ", &save_ptr);
+     }
+      }
+     args->length += 8 - (args->length % 4);   // account for alignment and NULL
+
+   return args;
+
 }
 
 /* A thread function that loads a user process and makes it start
    running. */
 static void
-start_process (void *f_name)
+start_process (void *args_)
 {
-  char *file_name = f_name;
+  struct args *args = args_;
+
+ // char *file_name = f_name;
   struct intr_frame if_;
   bool success;
 
@@ -59,10 +138,14 @@ start_process (void *f_name)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (args, &if_.eip, &if_.esp);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
+  //palloc_free_page (file_name);
+    args->loaded = success;
+
+    sema_up(&args->block);  
+
   if (!success) 
     thread_exit ();
 
@@ -88,6 +171,8 @@ start_process (void *f_name)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
+  //int i = 1;
+ // while (i<100000000) i++;
   return -1;
 }
 
@@ -195,7 +280,7 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (void **esp, struct args* args);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
@@ -206,8 +291,9 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
 bool
-load (const char *file_name, void (**eip) (void), void **esp) 
+load (struct args* args, void (**eip) (void), void **esp) 
 {
+  const char *file_name = args->argv[0];
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
   struct file *file = NULL;
@@ -302,7 +388,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (esp, args))
     goto done;
 
   /* Start address. */
@@ -427,7 +513,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool
-setup_stack (void **esp) 
+setup_stack (void **esp, struct args* args)  
 {
   uint8_t *kpage;
   bool success = false;
@@ -436,8 +522,43 @@ setup_stack (void **esp)
   if (kpage != NULL) 
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
-      if (success)
-        *esp = PHYS_BASE;
+      if (success) {
+        char* esp_data = (char*)PHYS_BASE;
+        char** esp_address = (char**)(esp_data - (char*)(args->length));
+        int i = args->argc-1;
+
+        /*
+        |________| PHYS_BASE, esp_data
+        |        | decrement esp_data to the length of argv[i] to store the new argument,
+        |        | then store the pointer to current esp_data in esp_address
+        |        |
+        |________| PHYS_BASE - length (argv), esp_address
+        |        |
+        |        |
+        |________|
+        */
+
+
+        while(i>=0) {
+            int arg_length = strlen(args->argv[i]);
+            esp_data = esp_data - arg_length - 1;
+            memcpy(esp_data, args->argv[i], arg_length + 1);
+            esp_address--;
+            *esp_address = esp_data;
+            i--; 
+        }
+        esp_data = (char *)esp_address;
+        esp_address--;
+        *esp_address = esp_data;
+        esp_address -= sizeof(int)/sizeof(char**);
+        memcpy(esp_address, &(args->argc), sizeof(int));
+        esp_address--;
+        *esp = esp_address;
+        //printf("%s\n", esp_ );
+       // *esp = PHYS_BASE-12;
+      }
+
+
       else
         palloc_free_page (kpage);
     }
