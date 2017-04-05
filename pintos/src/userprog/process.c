@@ -554,8 +554,6 @@ setup_stack (void **esp, struct args* args)
         memcpy(esp_address, &(args->argc), sizeof(int));
         esp_address--;
         *esp = esp_address;
-        //printf("%s\n", esp_ );
-       // *esp = PHYS_BASE-12;
       }
 
 
