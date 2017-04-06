@@ -147,8 +147,17 @@ page_fault (struct intr_frame *f)
   not_present = (f->error_code & PF_P) == 0;
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
+
+  /* According to the reference, copy former eax to eip
+  and set eax to 0xffffffff */
   
+  if(page_fault_cnt>0) {
+      f->eip = f->eax;
+      f->eax = 0xffffffff;
+    }
+
 /* This condition passes bad-write test */
+  
   if(!user || !write || not_present) {
     exit(-1);
     }
