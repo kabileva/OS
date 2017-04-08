@@ -123,8 +123,9 @@ struct thread
 #endif
     /*For files */
     int fd;
-    struct list files;
-
+    struct list files;                  /* List which stores all the files for a thread */ 
+          
+    struct file* file;                  /* Pointer to file which was executed whith the thread */
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };

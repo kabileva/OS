@@ -32,7 +32,6 @@ static unsigned sys_tell(int);
 static struct fd* find_file(struct list* files, int file_descriptor);
 static struct lock files_lock;
 
-struct list* files;
 #define WORD_SIZE 4
 
 
@@ -52,7 +51,6 @@ syscall_init (void)
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
   lock_init(&files_lock);
-  list_init(&files);
 
 }
 
@@ -60,8 +58,8 @@ static void
 syscall_handler (struct intr_frame *f UNUSED) 
 {
 	int reg = ptr_to_int(f->esp); 
-
-switch(reg)
+	/* Switch the sys calls according to the value of register*/
+	switch(reg)
 	{
 
 		case SYS_EXIT:
@@ -92,31 +90,13 @@ switch(reg)
 		break;
 		case SYS_WAIT:
 		{
-			/* NOTE: used tid_t instead of pid_t. I don't see any problem
-			   that it could cause. */
-
-			/* Get first argument. */
 			f->eax = sys_wait(f);
 			break;
 		}
 
 	case SYS_EXEC:
 		{
-			/* Get first argument. */
-			char *file_name = (char *) ptr_to_int (f->esp + WORD_SIZE);
-			/* I was looking in the for the information as to where save
-			   return value from the sys_call. Couldn't find any except
-			   in internet. Seems like f->eax is place where we should
-			   store the return value. Keep in mind that we should store
-			   there the return value as int, right in the memory. NOTE:
-			   Read online and found that in IAx32 systems, the return
-			   scheme differs based on the return type - integral type or
-			   pointer will be stored in eax register | floating-point and
-			   structures will be stored in floating point register and on
-			   stack correspondigly, but seemingly, we don't have to deal
-			   with two latter cases here. So just store the return value
-			   in f->eax. */
-			f->eax = sys_exec (file_name);
+			f->eax = sys_exec ((char *) ptr_to_int (f->esp + WORD_SIZE));
 			break;
 		}
 	case SYS_FILESIZE: f->eax = sys_filesize(ptr_to_int(f->esp+WORD_SIZE));
@@ -159,6 +139,10 @@ sys_exit (int status)
 
 }
 
+/* For pushing the file in the list with all filed of the current thread
+and uncrementing the fd (needed for open-twice and close-twice test, because every time the file opens 
+it should have different fds).
+Returns the new fd of a given file */
 static int push_file(struct file* file) {
 	struct fd* fd = malloc(sizeof(struct fd));
 	lock_acquire(&files_lock);
@@ -173,10 +157,12 @@ static int push_file(struct file* file) {
 	return fd->descriptor;
 }
 
+/* Opens the file with the given name. Returns -1 if the file is NULL.
+Does nothing if the name is NULL */
 static void sys_open(struct intr_frame *f) {
 	
 	/* Pull arguments from stack */
-	char *name = (char*)ptr_to_int(f->esp+4);
+	char *name = (char*)ptr_to_int(f->esp+WORD_SIZE);
 	struct file* file;
 
 	if(name==NULL) return;
@@ -184,18 +170,16 @@ static void sys_open(struct intr_frame *f) {
 	/* Try to open the file */
 	file = filesys_open(name);
  	lock_release(&files_lock);
-	if(file==NULL) {
+	if(file==NULL) 
 		f->eax = -1;
-	}
-	else {
-		 f->eax = push_file(file);
-     	} 
+	else 
+		f->eax = push_file(file);
 	return;
 }
 
 static void sys_remove(struct intr_frame *f) {
 		lock_acquire(&files_lock);
-		const char* name = (const char*)ptr_to_int(f->esp+4);
+		const char* name = (const char*)ptr_to_int(f->esp+WORD_SIZE);
 		f->eax = filesys_remove(name);
 		lock_release(&files_lock);
 		return;
@@ -206,12 +190,13 @@ static void sys_read(struct intr_frame *f) {
 
 	char* buf;
  	size_t size;
-	/*Try to acquire the lock if it's still not held
- 	by the current thread */
-	
+
+ 	/* Pull arguments from stack */
+
 	int fd = ptr_to_int(f->esp+WORD_SIZE);
- 	size= ptr_to_int(f->esp+12);
- 	buf = ptr_to_int(f->esp+8);
+ 	size= ptr_to_int(f->esp+3*WORD_SIZE);
+ 	buf = ptr_to_int(f->esp+2*WORD_SIZE);
+
  	 /* Validate the pointer */
 
  	if (buf+size > PHYS_BASE) exit(-1);
@@ -238,13 +223,17 @@ static void sys_read(struct intr_frame *f) {
  	
 }
 
-
+/* Creates the file with the given name and size;
+   Returns true if successful, false otherwise.
+   Fails if a file named NAME already exists,
+   or if internal memory allocation fails */
 static void sys_create(struct intr_frame *f) {
 	bool created;
 	/* Pull arguments from stack */
-	char *file = (char*)ptr_to_int(f->esp+4);
+	char *file = (char*)ptr_to_int(f->esp+WORD_SIZE);
 
-	int initial_size = (size_t)ptr_to_int(f->esp+8);
+	int initial_size = (size_t)ptr_to_int(f->esp+2*WORD_SIZE);
+
 	lock_acquire(&files_lock);
 	if(file==NULL) exit(-1);
 	created = filesys_create (file,initial_size); 
@@ -253,25 +242,25 @@ static void sys_create(struct intr_frame *f) {
 	f->eax = created;
 }
 
+/* Writes either to console or to the file. Returns -1 if failed,
+size in bytes of the written text if successfull */
  static void sys_write(struct intr_frame *f)
  {
  	const char* buf;
  	size_t size;
- 	/*Try to acquire the lock if it's still not held
- 	by the current thread */
-	if (!lock_held_by_current_thread (&files_lock)) 
-		lock_acquire(&files_lock);
-	lock_release(&files_lock);
 
- 	size= ptr_to_int(f->esp+12);
- 	buf = ptr_to_int(f->esp+8);
- 	if(buf+size > PHYS_BASE || get_user(buf) == -1) exit(-1);
+ 	size= ptr_to_int(f->esp+3*WORD_SIZE);
+ 	buf = ptr_to_int(f->esp+2*WORD_SIZE);
+
+ 	/*Check the pointer and if it is possible to write the whole text there */
+ 	if(buf+size > PHYS_BASE ) exit(-1);
  	if(size<=0) {
  		f->eax = 0;
  		return; 
  	} 
- 	int fd = ptr_to_int(f->esp+4);
+ 	int fd = ptr_to_int(f->esp+WORD_SIZE);
 
+ 	/* Return an error */
  	if (fd==0) 
  		f->eax=-1;
  	/*Write to console */
@@ -283,40 +272,34 @@ static void sys_create(struct intr_frame *f) {
 	}
 	/*Write to file */
 	else {
-
+		/*Find the file and if it exists write to it */
 		struct fd* file_descriptor = find_file(&thread_current()->files, fd);
-		if (file_descriptor) {
 		lock_acquire(&files_lock);
 		f->eax = file_write(file_descriptor->file, buf, size);
-		lock_release(&files_lock);
-	}	
-	else f->eax = 0;
-		
-
+		lock_release(&files_lock);		
 	}
-
-	return -1;
 }	
 
 static void sys_close(struct intr_frame *f)
 {
 	int file_descriptor = ptr_to_int(f->esp+WORD_SIZE);
 	/* find such fd */
-	struct fd* ret = find_file(&thread_current()->files, file_descriptor);
+	struct fd* fd = find_file(&thread_current()->files, file_descriptor);
 
-	if(ret)
+	if(fd)
 	{
 		lock_acquire(&files_lock);
-		file_close(ret->file);
+		file_close(fd->file);
 		lock_release(&files_lock);
-
-		list_remove(&ret->elem);
-		free(ret);
+		list_remove(&fd->elem);
+		free(fd);
 	}
 }
 
+/* Function for findint the file desctiptor in the list of files of the current
+thread. Returns NULL if nothing was found, struct fd if the descriptor was found */
 static struct fd* find_file(struct list* files, int file_descriptor) {
-	struct fd* ret = NULL;
+	struct fd* fd = NULL;
 	struct fd* tmp = malloc(sizeof(struct fd));
 
 	struct list_elem* e;
@@ -327,22 +310,15 @@ static struct fd* find_file(struct list* files, int file_descriptor) {
 		tmp = list_entry(e, struct fd, elem);
 		if (tmp->descriptor == file_descriptor )
 		{
-			ret = tmp;
+			fd = tmp;
 			break;
 		}
 	}
-	return ret;
+	return fd;
 }
 
 
-/*Code from the reference */
-static int get_user(const uint8_t* uaddr)
-{
-	int result;
-	asm("movl $1f, %0; movzbl %1, %0; 1:"
-			: "=&a" (result) : "m" (*uaddr));
-	return result;
-}
+
 int
 sys_wait (struct intr_frame* f) 
 {	
@@ -356,58 +332,49 @@ sys_wait (struct intr_frame* f)
 }
 
    
-/* Function that is called when SYS_EXEC invoked. Executes given file. */
+/* Executes the file with a given file_name*/
 int
 sys_exec (char *file_name) 
 {
-	/* Execute the command line given. */
-	if(file_name >= PHYS_BASE || get_user(file_name) == -1) exit(-1);
 
-	int tid = process_execute (file_name);
+	return process_execute (file_name);
 }
 
+
+/* Returns the file_length of the file with given fd (size in bytes),
+returns -1 if the file doesn't exist */
 static int sys_filesize(int fd)
 {
-	/*
-	 * try to find fd in the list of fds, which belong to current process
-	 * no need to acquire a lock, because no data racing in this list.
-	 * only holder can access this list
-	 */
+
 	struct fd* file_descriptor = find_file(&(thread_current()->files), fd);
-	int ret = -1;
 	if (file_descriptor)
 	{
-		// if there is such fd, return the length of the file.
-		lock_acquire(&files_lock);
-		ret = file_length(file_descriptor->file);
-		lock_release(&files_lock);
+		return file_length(file_descriptor->file);
 	}
-	return ret;
+	return -1;
 }
 
-
+/* Sets the current position in file with given fd to position bytes from the
+   start of the file. */
 static void sys_seek(int fd, unsigned position)
 {
-	/* find such fd */
 	struct fd* file_descriptor = find_file(&thread_current()->files, fd);
 	if(file_descriptor)
 	{
-		// if found, seek
 		lock_acquire(&files_lock);
 		file_seek(file_descriptor->file, position);
 		lock_release(&files_lock);
 	}
 }
 
-
+/* Returns the current position in FILE with given fd as a byte offset from the
+   start of the file. */
 static unsigned sys_tell(int fd)
 {
-	/* find such fd */
 	struct fd* file_descriptor = find_file(&thread_current()->files, fd);
 	unsigned ret = 0;
 	if(file_descriptor)
 	{
-		// if found, tell
 		lock_acquire(&files_lock);
 		ret = file_tell(file_descriptor->file);
 		lock_release(&files_lock);
@@ -428,6 +395,15 @@ static int ptr_to_int(const void* ptr)
 			exit(-1);
 	}
 	return *((int *)ptr);
+}
+
+/*Code from the reference */
+static int get_user(const uint8_t* uaddr)
+{
+	int result;
+	asm("movl $1f, %0; movzbl %1, %0; 1:"
+			: "=&a" (result) : "m" (*uaddr));
+	return result;
 }
 
  

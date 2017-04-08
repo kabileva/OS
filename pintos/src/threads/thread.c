@@ -608,13 +608,10 @@ init_thread (struct thread *t, const char *name, int priority)
   t->priority = priority;
   t->fd = 2;
   t->magic = THREAD_MAGIC;
-  //t->executable = NULL;
   list_push_back (&all_list, &t->allelem);
-  // printf("Initiated the children of thread %s, which is child of %s\n", t->name, running_thread ()->name);
   list_init (&t->children);
   list_init(&t->files);
 
-  // printf("%d check of the list is empty\n", list_empty (&t->children));
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and

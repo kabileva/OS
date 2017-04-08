@@ -23,10 +23,11 @@
 #define MAX_ARGS 128
 #define WORD_SIZE 4;
 
-
+/*Structure for storing the parsed command line and some information
+about the loading status of the process */
 struct args {
   size_t argc;
-  char** argv; 
+  char** argv;  
   size_t length;
   bool load_success;   /*check whether was load_success successfully */
   struct semaphore block;
@@ -68,15 +69,13 @@ process_execute (const char *file_name)
 
   args = parse_cmd(fn_copy);
 
- 
-    /* Create a new thread to execute FILE_NAME. */
-    tid = thread_create (args->argv[0], PRI_DEFAULT, start_process, args);
-     if (tid == TID_ERROR)
+  /* Create a new thread to execute FILE_NAME. */
+  tid = thread_create (args->argv[0], PRI_DEFAULT, start_process, args);
+  if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
-    /* waiting while loading is finished */
-    /* down the lock so that the print can work */
-    sema_down(&args->block);
-    /*Return an error if the process was not loaded successfully */
+  /* down the lock so that the print can work */
+  sema_down(&args->block);
+  /*Return an error if the process was not loaded successfully */
  if(!args->load_success)
     tid = TID_ERROR;
   /* deallocate memory */
@@ -88,7 +87,7 @@ process_execute (const char *file_name)
 }
 
 
-
+/* Function for initializing the members of args structure */
 static struct args* init_args (struct args* args) {
   args = malloc(sizeof(struct args));
   args->argv = malloc(sizeof(char*)*MAX_ARGS);
@@ -100,7 +99,7 @@ static struct args* init_args (struct args* args) {
 }
 
 
-
+/* Function for parsing the command line arguments */
 static struct args* parse_cmd(const char *fn_copy) {
    struct args* args;
    args = init_args(args);
@@ -219,6 +218,10 @@ process_exit (void)
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = curr->pagedir;
+  /* Close the file */
+  file_close(curr->file);
+  /* Assign the file of the current thread to NULL */
+  curr->file=NULL;
   if (pd != NULL) 
     {
       /* Correct ordering here is crucial.  We must set
@@ -420,13 +423,16 @@ load (struct args* args, void (**eip) (void), void **esp)
         }
     }
 
-  /* Set up stack. */
+  /* Setup the stack, i.e. push all the arguments */
   if (!setup_stack (esp, args))
     goto done;
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
+  /* Add the file to the current thread and deny writes since it's opened */
+  thread_current()->file = filesys_open(args->argv[0]);
+  file_deny_write(thread_current()->file);
   success = true;
 
  done:
@@ -539,8 +545,8 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   return true;
 }
 
-/* Create a minimal stack by mapping a zeroed page at the top of
-   user virtual memory. */
+/* Function for pushing the arguments together with the addresses to the stack,
+according to the schema which was given in the reference ppt */
 static bool
 setup_stack (void **esp, struct args* args)  
 {
@@ -552,6 +558,8 @@ setup_stack (void **esp, struct args* args)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success) {
+
+       
         char* esp_data = (char*)PHYS_BASE;
         char** esp_address = (char**)(esp_data - (char*)(args->length));
         int i = args->argc-1;
@@ -567,7 +575,7 @@ setup_stack (void **esp, struct args* args)
         |________|
         */
 
-
+      /*Push every arg to the stack together with the address to it, then decrement */
         while(i>=0) {
             int arg_length = strlen(args->argv[i]);
             esp_data = esp_data - arg_length - 1;
@@ -576,6 +584,7 @@ setup_stack (void **esp, struct args* args)
             *esp_address = esp_data;
             i--; 
         }
+        /*Push the return address, null pointer and pointer to argc */
         esp_data = (char *)esp_address;
         esp_address--;
         *esp_address = esp_data;
