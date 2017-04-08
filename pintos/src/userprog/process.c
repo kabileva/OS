@@ -21,6 +21,8 @@
 #include "threads/malloc.h"
 
 #define MAX_ARGS 128
+#define WORD_SIZE 4;
+
 
 struct args {
   size_t argc;
@@ -165,16 +167,48 @@ start_process (void *args_)
    child of the calling process, or if process_wait() has already
    been successfully called for the given TID, returns -1
    immediately, without waiting.
-
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  //int i = 1;
- // while (i<100000000) i++;
-  return -1;
+  struct thread *t = thread_current ();
+  /* If was terminated by the kernel, then -1. */
+  if (child_tid == -1) return -1;
+  
+  /* Check of child_tid is actually is child, otherwise -1. */
+  if (!is_child (child_tid, t)) return -1; 
+
+  struct child_meta *cm = get_child (child_tid, t);
+  // printf("%d check of the list is empty in process wait\n", list_empty (&cm->child->children));
+
+  ASSERT (cm != NULL);
+  /* If thread with this child_tid has been called with process
+     wait, then -1. */
+  enum intr_level old_level = intr_disable ();
+  if (cm->wait)
+  {
+    intr_set_level (old_level);
+    return -1;
+  } 
+  
+  cm->wait = true;
+  intr_set_level (old_level);
+
+  /* Wait for child to terminate. */
+  sema_down (&cm->finished);  
+
+  /* If the child process was terminated with kernel, then -1. 
+     NOTE: I don't know yet how to check if the child process
+     was terminated with kernel, thus miss this point for now. */
+
+  /* Otherwise return its exit status. */
+  // printf("%d check of the list is empty in process wait DAUREN\n", list_empty (&cm->child->children));
+  int status = cm->status;
+  remove_child (child_tid, t);
+  return status;
 }
+
 
 /* Free the current process's resources. */
 void
@@ -454,15 +488,11 @@ validate_segment (const struct Elf32_Phdr *phdr, struct file *file)
 /* Loads a segment starting at offset OFS in FILE at address
    UPAGE.  In total, READ_BYTES + ZERO_BYTES bytes of virtual
    memory are initialized, as follows:
-
         - READ_BYTES bytes at UPAGE must be read from FILE
           starting at offset OFS.
-
         - ZERO_BYTES bytes at UPAGE + READ_BYTES must be zeroed.
-
    The pages initialized by this function must be writable by the
    user process if WRITABLE is true, read-only otherwise.
-
    Return true if successful, false if a memory allocation error
    or disk read error occurs. */
 static bool

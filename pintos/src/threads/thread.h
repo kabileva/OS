@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -80,6 +81,25 @@ typedef int tid_t;
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
+
+/* Struct for keeping information about the child process. Stored
+   as a list element */
+struct child_meta
+  {
+    tid_t tid;                          /* ID of the thread (or process, howerver 
+                                           you call, in PintOS they are same). */
+    int status;                         /* Status in case of set by child thread
+                                           in case of termination. */
+    bool wait;                          /* Boolean to check if the thread is being
+                                           waited by some other thread, probably
+                                           parent. */
+    struct thread *child;               /* Pointer to child process. */
+    struct semaphore finished;          /* Semaphore in case parent needs to wait
+                                           for child to terminate. */
+    struct list_elem elem;              /* List element that is linked to parent's
+                                           children list. */
+  };
+
 struct thread
   {
     /* Owned by thread.c. */
@@ -88,15 +108,22 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
+    struct list_elem allelem;           /* List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
+    struct list children;               /* List of children processes (threads to
+                                           to be exact). */
+
+    struct thread *parent;              /* Parent of user program. */
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
 #endif
-
+    /*For files */
+    int fd;
+    struct list files;
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
@@ -105,6 +132,11 @@ struct thread
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+
+bool is_child (tid_t, struct thread *);
+struct child_meta *get_child (tid_t, struct thread *);
+bool remove_child (tid_t, struct thread *);
+void set_status (int);
 
 void thread_init (void);
 void thread_start (void);
@@ -124,7 +156,9 @@ const char *thread_name (void);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
+typedef void thread_action_func (struct thread *t, void *aux);
 
+void thread_foreach (thread_action_func *, void *);
 int thread_get_priority (void);
 void thread_set_priority (int);
 

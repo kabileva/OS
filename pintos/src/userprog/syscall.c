@@ -8,6 +8,8 @@
 #include <lib/kernel/console.h>
 #include "threads/synch.h"
 #include "filesys/filesys.h"
+
+
 static int get_user(const uint8_t* uaddr);
 
 static int ptr_to_int(const void*);
@@ -19,9 +21,22 @@ static void sys_create(struct intr_frame *f);
 static void sys_open(struct intr_frame *f);
 static void sys_read(struct intr_frame *f);
 static void sys_remove(struct intr_frame *f);
-
+static int get_arg (void *);
+static void sys_exit (int);
+static int sys_exec (char *);
+static int sys_wait (tid_t);
+static int push_file(struct file* file);
+static void sys_close(struct intr_frame *f);
 static struct lock files_lock;
 struct list* files;
+#define WORD_SIZE 4
+
+
+static struct fd {
+	struct file* file;
+	int descriptor;
+	struct list_elem elem;
+};
 
 void exit(int code)
 {
@@ -33,7 +48,7 @@ syscall_init (void)
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
   lock_init(&files_lock);
-  
+  list_init(&files);
 
 }
 
@@ -44,8 +59,14 @@ syscall_handler (struct intr_frame *f UNUSED)
 
 switch(reg)
 	{
- 	case SYS_EXIT: sys_exit(ptr_to_int(f->esp+4));
-		break;
+
+		case SYS_EXIT:
+		{	
+			/* Get first argument. */
+			int status = ptr_to_int (f->esp + WORD_SIZE);
+			sys_exit (status);
+			break;
+		}
 	case SYS_WRITE: 
 		sys_write(f); break;
 	case SYS_CREATE:
@@ -55,7 +76,7 @@ switch(reg)
 		sys_open(f);
 		break;
 	case SYS_CLOSE:
-
+		//sys_close(f);
 		break;
 	case SYS_READ:
 
@@ -64,6 +85,39 @@ switch(reg)
 	case SYS_REMOVE:
 		sys_remove(f);
 		break;
+		case SYS_WAIT:
+		{
+			/* NOTE: used tid_t instead of pid_t. I don't see any problem
+			   that it could cause. */
+
+			/* Get first argument. */
+			tid_t tid = ptr_to_int (f->esp + WORD_SIZE);
+
+			f->eax = sys_wait (tid);
+			break;
+		}
+
+	case SYS_EXEC:
+		{
+			/* Get first argument. */
+			char *file_name = (char *) ptr_to_int (f->esp + WORD_SIZE);
+
+			/* I was looking in the for the information as to where save
+			   return value from the sys_call. Couldn't find any except
+			   in internet. Seems like f->eax is place where we should
+			   store the return value. Keep in mind that we should store
+			   there the return value as int, right in the memory. NOTE:
+			   Read online and found that in IAx32 systems, the return
+			   scheme differs based on the return type - integral type or
+			   pointer will be stored in eax register | floating-point and
+			   structures will be stored in floating point register and on
+			   stack correspondigly, but seemingly, we don't have to deal
+			   with two latter cases here. So just store the return value
+			   in f->eax. */
+			f->eax = sys_exec (file_name);
+			break;
+		}
+			
 	default:
 		{
  		exit(-1);
@@ -72,32 +126,51 @@ switch(reg)
 }
 
 
-static void sys_exit(int code) {
-
-	printf( "%s: exit(%d)\n", thread_name(), code);
+static void 
+sys_exit (int status)
+{
+	/* Print exit message. */
+	printf ("%s: exit(%d)\n", thread_name (), status);
+	set_status (status);
+	// printf("finish\n");
 	thread_exit ();
-	NOT_REACHED ();
 }
+
+static int push_file(struct file* file) {
+	struct fd* fd = malloc(sizeof(struct fd));
+	fd->file = file;
+	fd->descriptor = thread_current()->fd;
+	thread_current()->fd++;
+	list_push_back(&thread_current()->files, &fd->elem);
+	return fd->descriptor;
+}
+
 static void sys_open(struct intr_frame *f) {
 	
 	/* Pull arguments from stack */
 	char *name = (char*)ptr_to_int(f->esp+4);
-	if(name==NULL) return;
-	struct fd* fd;
+	struct file* file;
 
+	if(name==NULL) return;
+	int tmp_fd;
+	if(tmp_fd<2) tmp_fd = 2;
+	else tmp_fd = 1;
+	//printf("%d\n", tmp_fd );
 	lock_acquire(&files_lock);
 	/* Try to open the file */
-	struct file* file;
 	file = filesys_open(name);
-	lock_release(&files_lock);
- 
+ 	
 	if(file==NULL) {
+		//printf("NULL \n");
+
 		f->eax = -1;
-		return;
 	}
 	else {
-		/*Somehow store or change file descriptor */
-	} 
+		//f->eax = push_file(file);
+     	} 
+    lock_release(&files_lock);
+	return;
+
 
 }
 
@@ -117,7 +190,6 @@ static void sys_read(struct intr_frame *f) {
  	by the current thread */
 	if (!lock_held_by_current_thread (&files_lock)) 
 		lock_acquire(&files_lock);
- 	int fd = ptr_to_int(f->esp+4);
  	size= ptr_to_int(f->esp+12);
  	buf = ptr_to_int(f->esp+8);
 
@@ -157,6 +229,7 @@ static void sys_create(struct intr_frame *f) {
  	by the current thread */
 	if (!lock_held_by_current_thread (&files_lock)) 
 		lock_acquire(&files_lock);
+	lock_release(&files_lock);
 
  	size= ptr_to_int(f->esp+12);
  	buf = ptr_to_int(f->esp+8);
@@ -183,7 +256,6 @@ static void sys_create(struct intr_frame *f) {
 
 	}
 
-	lock_release(&files_lock);
 	return -1;
 }	
 
@@ -194,6 +266,23 @@ static int get_user(const uint8_t* uaddr)
 	asm("movl $1f, %0; movzbl %1, %0; 1:"
 			: "=&a" (result) : "m" (*uaddr));
 	return result;
+}
+int
+sys_wait (tid_t tid)
+{	
+	/* NOTE: Read 3.3.4 about this system call. */
+
+	/* Wait for the given tid to terminate. */
+	return process_wait (tid);
+}
+
+   
+/* Function that is called when SYS_EXEC invoked. Executes given file. */
+int
+sys_exec (char *file_name) 
+{
+	/* Execute the command line given. */
+	return process_execute (file_name);
 }
 
 

@@ -11,10 +11,10 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
-
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
@@ -27,6 +27,7 @@
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 static struct list ready_list;
+static struct list all_list;
 
 /* Idle thread. */
 static struct thread *idle_thread;
@@ -36,6 +37,8 @@ static struct thread *initial_thread;
 
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
+static void child_add (struct thread *);
+
 
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
@@ -84,6 +87,134 @@ static tid_t allocate_tid (void);
 
    It is not safe to call thread_current() until this function
    finishes. */
+
+/* Checks if given thread ID is child of given thread. */
+bool 
+is_child (tid_t tid, struct thread *t)
+{
+  /* NOTE: I spend 3 hours fixing this bug, so initially it was like this:
+     
+     struct list children = thread_current ()->children;
+
+     where it should have been as follows. Basically, when you create a
+     local variable for stucture, and assign it to other structure (it is 
+     my interpretation_) - so it basically a memory copy. Can be searched
+     in the web as assignment of stuct. From what I learned, it is better
+     to use the pointer. From the web - "The assignment will only do it 
+     for immediate members of a structures and will fail to copy when you 
+     have Complex datatypes in a structure. Here COMPLEX means that you
+      cant have array of pointers ,pointing to lists.". */ 
+
+  struct list *children = &t->children; 
+  struct list_elem *e;
+
+  /* For each child, check if it has tid same as given tid. */
+  for (e = list_begin (children); e != list_end (children);
+   e = list_next (e))
+  {
+    struct child_meta *cm = list_entry (e, struct child_meta, elem);
+    /* If found, return true. */
+    if (cm->tid == tid) return true;
+  }
+  /* Otherwise false. */
+  return false;
+}
+
+
+/* Get the child meta information with given tid of thread t. Returns 
+   NULL if no such child exists. */
+struct child_meta *
+get_child (tid_t tid, struct thread *t)
+{
+  struct list *children = &t->children;
+  struct list_elem *e;
+
+  /* For each child, check if it has tid same as given tid. */
+  for (e = list_begin (children); e != list_end (children);
+   e = list_next (e))
+  {
+    struct child_meta *cm = list_entry (e, struct child_meta, elem);
+    /* If found, return child meta information. */
+    if (cm->tid == tid) return cm;
+  }
+  /* Otherwise return NULL. */
+  return NULL;
+}
+
+/* Remove child meta from children list of thread t, and 
+   deallocate allocated memory for the child meta struct. If
+   given tid thread is not child, or its lock is still acquaired,
+   then return false. */ 
+bool 
+remove_child (tid_t tid, struct thread *t)
+{
+  /* Check if child. */
+  if (is_child (tid, t) == false) return false;
+
+  /* Get child. */
+  struct child_meta *cm = get_child (tid, t);
+  ASSERT (cm != NULL);
+
+
+  /* Check if child is terminated, and, if so, remove it from
+     the children list and return true. */
+  if (sema_try_down (&cm->finished)) 
+  {
+    sema_up (&cm->finished);
+    list_remove (&cm->elem);
+    /* Free the allocated resoures for the child. */
+    free (cm);
+    return true;
+  }
+
+  /* Otherwise, return false. */
+  return false;
+}
+
+/* Add child to current thread. */
+static void 
+child_add (struct thread *t) 
+{
+  /* Set the parent of created thread as current thread. */
+  t->parent = thread_current ();
+
+  /* Allocate memory for meta information of child, in case it terminates
+     and parent process needs its information. */
+  struct child_meta *cm = malloc (sizeof (struct child_meta));
+  cm->tid = t->tid;
+  cm->status = -1;
+  cm->wait = false;
+  cm->child = t;
+  sema_init (&cm->finished, 0);
+
+  /* Push the created thread into the children list of current thread. */
+  list_push_back (&running_thread ()->children, &cm->elem);
+}
+
+/* Set the status for meta data of current thread for the parent,
+   and also up the semaphore for any process that is waiting on
+   this thread. This function should be called when thread
+   terminates. */
+void 
+set_status (int status)
+{
+  struct thread *t = thread_current ();
+  
+  /* TODO: Check if parent exists. */
+
+  struct child_meta *cm = get_child (t->tid, t->parent);
+  /* If no such child, then return. */
+  if (cm == NULL) return;
+
+  /* Set the status. */
+  cm->status = status;
+
+  /* Sema up the semaphore that is used to indicate whether this
+     thread has been finished, or not. Used by parent process. */
+  sema_up (&cm->finished);
+}
+
+
 void
 thread_init (void) 
 {
@@ -91,12 +222,15 @@ thread_init (void)
 
   lock_init (&tid_lock);
   list_init (&ready_list);
+  list_init (&all_list);
+
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+  initial_thread->fd = 1;
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -170,6 +304,8 @@ thread_create (const char *name, int priority,
   struct switch_entry_frame *ef;
   struct switch_threads_frame *sf;
   tid_t tid;
+    enum intr_level old_level;
+
 
   ASSERT (function != NULL);
 
@@ -181,6 +317,15 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+
+   /* Add child. */
+  child_add (t);
+
+
+  /* Prepare thread for first run by initializing its stack.
+     Do this atomically so intermediate values for the 'stack' 
+     member cannot be observed. */
+  old_level = intr_disable ();
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -195,6 +340,9 @@ thread_create (const char *name, int priority,
   /* Stack frame for switch_threads(). */
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
+
+    intr_set_level (old_level);
+
 
   /* Add to run queue. */
   thread_unblock (t);
@@ -287,6 +435,8 @@ thread_exit (void)
   /* Just set our status to dying and schedule another process.
      We will be destroyed during the call to schedule_tail(). */
   intr_disable ();
+    list_remove (&thread_current()->allelem);
+
   thread_current ()->status = THREAD_DYING;
   schedule ();
   NOT_REACHED ();
@@ -309,6 +459,23 @@ thread_yield (void)
   schedule ();
   intr_set_level (old_level);
 }
+/* Invoke function 'func' on all threads, passing along 'aux'.
+   This function must be called with interrupts off. */
+void
+thread_foreach (thread_action_func *func, void *aux)
+{
+  struct list_elem *e;
+
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+   e = list_next (e))
+  {
+    struct thread *t = list_entry (e, struct thread, allelem);
+    func (t, aux);
+  }
+}
+
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
@@ -430,16 +597,23 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
+
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
-
+  
   memset (t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+  list_push_back (&all_list, &t->allelem);
+  // printf("Initiated the children of thread %s, which is child of %s\n", t->name, running_thread ()->name);
+  list_init (&t->children);
+  list_init(&t->files);
+
+  // printf("%d check of the list is empty\n", list_empty (&t->children));
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
