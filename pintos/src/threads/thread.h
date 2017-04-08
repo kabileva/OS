@@ -124,6 +124,7 @@ struct thread
     /*For files */
     int fd;
     struct list files;
+
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };

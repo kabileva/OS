@@ -230,7 +230,6 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
-  initial_thread->fd = 1;
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -304,7 +303,7 @@ thread_create (const char *name, int priority,
   struct switch_entry_frame *ef;
   struct switch_threads_frame *sf;
   tid_t tid;
-    enum intr_level old_level;
+  enum intr_level old_level;
 
 
   ASSERT (function != NULL);
@@ -341,7 +340,7 @@ thread_create (const char *name, int priority,
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
 
-    intr_set_level (old_level);
+  intr_set_level (old_level);
 
 
   /* Add to run queue. */
@@ -607,7 +606,9 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->fd = 2;
   t->magic = THREAD_MAGIC;
+  //t->executable = NULL;
   list_push_back (&all_list, &t->allelem);
   // printf("Initiated the children of thread %s, which is child of %s\n", t->name, running_thread ()->name);
   list_init (&t->children);

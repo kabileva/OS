@@ -28,7 +28,7 @@ struct args {
   size_t argc;
   char** argv; 
   size_t length;
-  bool loaded;
+  bool load_success;   /*check whether was load_success successfully */
   struct semaphore block;
 
 };
@@ -40,7 +40,7 @@ static struct args* parse_cmd(const char *fn_copy);
 static struct args* init_args (struct args* args);
 static void
 start_process (void *f_name);
-/* Starts a new thread running a user program loaded from
+/* Starts a new thread running a user program load_success from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
@@ -76,13 +76,14 @@ process_execute (const char *file_name)
     /* waiting while loading is finished */
     /* down the lock so that the print can work */
     sema_down(&args->block);
- 
+    /*Return an error if the process was not loaded successfully */
+ if(!args->load_success)
+    tid = TID_ERROR;
   /* deallocate memory */
   palloc_free_page (fn_copy);
 
   free(args->argv);
   free(args);
-
   return tid;
 }
 
@@ -92,7 +93,7 @@ static struct args* init_args (struct args* args) {
   args = malloc(sizeof(struct args));
   args->argv = malloc(sizeof(char*)*MAX_ARGS);
   sema_init(&args->block, 0);
-  args->loaded = false;
+  args->load_success = false;
   args->argc = 0;
   args->length = 0;
   return args;
@@ -144,7 +145,7 @@ start_process (void *args_)
 
   /* If load failed, quit. */
   //palloc_free_page (file_name);
-    args->loaded = success;
+    args->load_success = success;
 
     sema_up(&args->block);  
 
@@ -180,7 +181,6 @@ process_wait (tid_t child_tid UNUSED)
   if (!is_child (child_tid, t)) return -1; 
 
   struct child_meta *cm = get_child (child_tid, t);
-  // printf("%d check of the list is empty in process wait\n", list_empty (&cm->child->children));
 
   ASSERT (cm != NULL);
   /* If thread with this child_tid has been called with process
@@ -203,7 +203,6 @@ process_wait (tid_t child_tid UNUSED)
      was terminated with kernel, thus miss this point for now. */
 
   /* Otherwise return its exit status. */
-  // printf("%d check of the list is empty in process wait DAUREN\n", list_empty (&cm->child->children));
   int status = cm->status;
   remove_child (child_tid, t);
   return status;
