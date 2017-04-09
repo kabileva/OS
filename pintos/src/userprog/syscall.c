@@ -15,7 +15,7 @@ static int get_user(const uint8_t* uaddr);
 static int ptr_to_int(const void*);
 static void sys_exit(int);
 static void sys_write(struct intr_frame *f);
-static int sys_filesize(int fd);
+static void sys_filesize(struct intr_frame* f);
 static void syscall_handler (struct intr_frame *);
 static void sys_create(struct intr_frame *f);
 static void sys_open(struct intr_frame *f);
@@ -26,9 +26,9 @@ static void sys_exit (int);
 static int sys_exec (char *);
 static int sys_wait (struct intr_frame* f);
 static int push_file(struct file* file);
-static void sys_close(struct intr_frame *f);
-static void sys_seek(int, unsigned);
-static unsigned sys_tell(int);
+static void sys_close(struct intr_frame* f);
+static void sys_seek(int fd, unsigned position);
+static void sys_tell(struct intr_frame* f);
 static struct fd* find_file(struct list* files, int file_descriptor);
 static struct lock files_lock;
 
@@ -62,17 +62,16 @@ syscall_handler (struct intr_frame *f UNUSED)
 	switch(reg)
 	{
 
-		case SYS_EXIT:
-		{	
-			/* Get first argument. */
-			int status = ptr_to_int (f->esp + WORD_SIZE);
-			sys_exit (status);
-			break;
-		}
+	case SYS_EXIT:
+	{
+		/* Get first argument. */
+		int status = ptr_to_int(f->esp+WORD_SIZE);
+		sys_exit (status);
+		break;
+	}
 	case SYS_WRITE: 
 		sys_write(f); 
 		break;
-
 	case SYS_CREATE:
 		sys_create(f);
 		break;
@@ -88,27 +87,23 @@ syscall_handler (struct intr_frame *f UNUSED)
 	case SYS_REMOVE:
 		sys_remove(f);
 		break;
-		case SYS_WAIT:
-		{
-			f->eax = sys_wait(f);
-			break;
-		}
-
+	case SYS_WAIT:
+		f->eax = sys_wait(f);
+		break;
 	case SYS_EXEC:
-		{
-			f->eax = sys_exec ((char *) ptr_to_int (f->esp + WORD_SIZE));
-			break;
-		}
-	case SYS_FILESIZE: f->eax = sys_filesize(ptr_to_int(f->esp+WORD_SIZE));
-			break;
-	case SYS_SEEK: sys_seek(ptr_to_int(f->esp+4), (unsigned)ptr_to_int(f->esp+8));
-			break;
-	case SYS_TELL: f->eax = (unsigned) sys_tell(ptr_to_int(f->esp+4));
-			break;
-
+		f->eax = sys_exec ((char *) ptr_to_int (f->esp + WORD_SIZE));
+		break;
+	case SYS_FILESIZE: 
+		sys_filesize(f);
+		break;
+	case SYS_SEEK: 
+		sys_seek(ptr_to_int(f->esp+4), (unsigned)ptr_to_int(f->esp+8));
+		break;
+	case SYS_TELL: 
+		sys_tell(f);
+		break;
 	case SYS_HALT:
-			break;
-			
+		break;
 	default:
 		{
  		exit(-1);
@@ -117,27 +112,6 @@ syscall_handler (struct intr_frame *f UNUSED)
 }
 
 
-static void 
-sys_exit (int status)
-{
-	/* Print exit message. */
-	printf ("%s: exit(%d)\n", thread_name (), status);
-	set_status (status);
-	struct fd* fd;
-	struct list_elem* e;
-
-	for(e = list_begin(&thread_current()->files);
-			e != list_end(&thread_current()->files);)
-	{
-		fd = list_entry(e, struct fd, elem);
-		e = list_remove(e);
-		file_close(fd->file);
-		free(fd);
-	}
-	thread_exit ();
-	NOT_REACHED ();
-
-}
 
 /* For pushing the file in the list with all filed of the current thread
 and uncrementing the fd (needed for open-twice and close-twice test, because every time the file opens 
@@ -184,6 +158,25 @@ static void sys_remove(struct intr_frame *f) {
 		lock_release(&files_lock);
 		return;
 
+}
+
+static void 
+sys_exit (int status)
+{
+	/* Print exit message. */
+	printf ("%s: exit(%d)\n", thread_name (), status);
+	set_status (status);
+	struct fd* fd;
+	struct list_elem* e = list_begin(&thread_current()->files);
+
+	while(e != list_end(&thread_current()->files))
+	{
+		fd = list_entry(e, struct fd, elem);
+		e = list_remove(e);
+		file_close(fd->file);
+		free(fd);
+	}
+	thread_exit ();
 }
 
 static void sys_read(struct intr_frame *f) {
@@ -254,6 +247,8 @@ size in bytes of the written text if successfull */
 
  	/*Check the pointer and if it is possible to write the whole text there */
  	if(buf+size > PHYS_BASE ) exit(-1);
+
+ 	/* Return if null text is given to write */
  	if(size<=0) {
  		f->eax = 0;
  		return; 
@@ -263,11 +258,10 @@ size in bytes of the written text if successfull */
  	/* Return an error */
  	if (fd==0) 
  		f->eax=-1;
+
  	/*Write to console */
  	else if (fd==1) {
- 	
  		putbuf(buf, size);
-
 		f->eax = size;
 	}
 	/*Write to file */
@@ -280,10 +274,10 @@ size in bytes of the written text if successfull */
 	}
 }	
 
+/*Close the file with the given fd and remove fd from the list */
 static void sys_close(struct intr_frame *f)
 {
 	int file_descriptor = ptr_to_int(f->esp+WORD_SIZE);
-	/* find such fd */
 	struct fd* fd = find_file(&thread_current()->files, file_descriptor);
 
 	if(fd)
@@ -318,7 +312,6 @@ static struct fd* find_file(struct list* files, int file_descriptor) {
 }
 
 
-
 int
 sys_wait (struct intr_frame* f) 
 {	
@@ -343,21 +336,21 @@ sys_exec (char *file_name)
 
 /* Returns the file_length of the file with given fd (size in bytes),
 returns -1 if the file doesn't exist */
-static int sys_filesize(int fd)
-{
 
+static void sys_filesize(struct intr_frame *f)
+{
+	int fd = ptr_to_int(f->esp+WORD_SIZE);
 	struct fd* file_descriptor = find_file(&(thread_current()->files), fd);
+	f->eax = -1;
 	if (file_descriptor)
-	{
-		return file_length(file_descriptor->file);
-	}
-	return -1;
+		f->eax = file_length(file_descriptor->file);
 }
 
 /* Sets the current position in file with given fd to position bytes from the
    start of the file. */
 static void sys_seek(int fd, unsigned position)
 {
+
 	struct fd* file_descriptor = find_file(&thread_current()->files, fd);
 	if(file_descriptor)
 	{
@@ -369,17 +362,18 @@ static void sys_seek(int fd, unsigned position)
 
 /* Returns the current position in FILE with given fd as a byte offset from the
    start of the file. */
-static unsigned sys_tell(int fd)
+static void sys_tell(struct intr_frame *f)
 {
+	int fd = ptr_to_int(f->esp+WORD_SIZE);
 	struct fd* file_descriptor = find_file(&thread_current()->files, fd);
-	unsigned ret = 0;
+	f->eax = 0;
 	if(file_descriptor)
 	{
 		lock_acquire(&files_lock);
-		ret = file_tell(file_descriptor->file);
+		f->eax = file_tell(file_descriptor->file);
 		lock_release(&files_lock);
 	}
-	return ret;
+	
 }
 
 /* Function for converting esp register to the int value and checking
