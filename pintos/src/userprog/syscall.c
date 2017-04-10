@@ -34,9 +34,10 @@ static struct lock files_lock;
 
 #define WORD_SIZE 4
 
-
+ /*For storing the file together with its descriptor 
+ and list_elem elem to use it in the list */ 
 static struct fd {
-	struct file* file;
+	struct file* file; 
 	int descriptor;
 	struct list_elem elem;
 };
@@ -296,7 +297,7 @@ static struct fd* find_file(struct list* files, int file_descriptor) {
 	struct fd* fd = NULL;
 	struct fd* tmp = malloc(sizeof(struct fd));
 
-	struct list_elem* e;
+	struct list_elem* e =  list_begin(&thread_current()->files);
 	for(e = list_begin(&thread_current()->files);
 			e != list_end(&thread_current()->files);
 			e = list_next(e))
@@ -309,6 +310,7 @@ static struct fd* find_file(struct list* files, int file_descriptor) {
 		}
 	}
 	return fd;
+
 }
 
 
@@ -383,6 +385,7 @@ static int ptr_to_int(const void* ptr)
 {
 	if (ptr>= PHYS_BASE) exit(-1);
 	int i;
+	/*Check every byte of the word */
 	for (i = 0; i < 4; ++i)
 	{
 		if (get_user(ptr+i) == -1)

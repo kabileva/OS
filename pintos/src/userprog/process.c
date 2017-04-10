@@ -26,11 +26,11 @@
 /*Structure for storing the parsed command line and some information
 about the loading status of the process */
 struct args {
-  size_t argc;
-  char** argv;  
-  size_t length;
+  size_t argc; /*  number of argv (file_name + # of arguments) */
+  char** argv;  /*list of the arguments together with the filename */
+  size_t length; /* length of the command line */
   bool load_success;   /*check whether was load_success successfully */
-  struct semaphore block;
+  struct semaphore block; /* used while starting the process for blocking interrupts */
 
 };
 
@@ -143,7 +143,6 @@ start_process (void *args_)
   success = load (args, &if_.eip, &if_.esp);
 
   /* If load failed, quit. */
-  //palloc_free_page (file_name);
     args->load_success = success;
 
     sema_up(&args->block);  
@@ -559,7 +558,6 @@ setup_stack (void **esp, struct args* args)
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success) {
 
-       
         char* esp_data = (char*)PHYS_BASE;
         char** esp_address = (char**)(esp_data - (char*)(args->length));
         int i = args->argc-1;
@@ -593,7 +591,6 @@ setup_stack (void **esp, struct args* args)
         esp_address--;
         *esp = esp_address;
       }
-
 
       else
         palloc_free_page (kpage);
