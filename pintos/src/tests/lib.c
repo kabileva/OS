@@ -28,7 +28,6 @@ void
 msg (const char *format, ...) 
 {
   va_list args;
-
   if (quiet)
     return;
   va_start (args, format);

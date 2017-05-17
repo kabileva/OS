@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include <hash.h>
 #include "threads/synch.h"
 
 /* States in a thread's life cycle. */
@@ -81,25 +82,6 @@ typedef int tid_t;
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
-
-/* Struct for keeping information about the child process. Stored
-   as a list element */
-struct child_meta
-  {
-    tid_t tid;                          /* ID of the thread (or process, howerver 
-                                           you call, in PintOS they are same). */
-    int status;                         /* Status in case of set by child thread
-                                           in case of termination. */
-    bool wait;                          /* Boolean to check if the thread is being
-                                           waited by some other thread, probably
-                                           parent. */
-    struct thread *child;               /* Pointer to child process. */
-    struct semaphore finished;          /* Semaphore in case parent needs to wait
-                                           for child to terminate. */
-    struct list_elem elem;              /* List element that is linked to parent's
-                                           children list. */
-  };
-
 struct thread
   {
     /* Owned by thread.c. */
@@ -113,36 +95,83 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
-    struct list children;               /* List of children processes (threads to
-                                           to be exact). */
+    struct list children;               /* List of children processes (stored as
+                                           child_meta to be exact). */
 
     struct thread *parent;              /* Parent of user program. */
+
+    struct list files;                  /* List of opened file descriptors of
+                                           current thread (stored as file_meta
+                                           to be exact). */
+
+    int fd;                             /* Values from which file descriptors
+                                           are obtained. */
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    struct file *execfile;              /* Pointer to its executable file. */
 #endif
-    /*For files */
-    int fd;
-    struct list files;                  /* List which stores all the files for a thread */ 
-          
-    struct file* file;                  /* Pointer to file which was executed whith the thread */
+
+    struct hash spt;                  /* Corresponding SPTE pointer for current frame
+                                           entry with all the information in SPTE. */
+       
+    int mmap_id;
+    struct list mmap_list;
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
+
+/* Struct for keeping information about the child process. Stored
+   as a list element */
+struct child_meta
+  {
+    tid_t tid;                          /* ID of the thread (or process, however 
+                                           you call, in PintOS they are same). */
+    int status;                         /* Status in case of set by child thread
+                                           in case of termination. */
+    bool wait;                          /* Boolean to check if the thread is being
+                                           waited by some other thread, probably
+                                           parent. */
+    struct thread *child;               /* Pointer to child process. */
+    struct semaphore finished;          /* Semaphore in case parent needs to wait
+                                           for child to terminate. */
+    struct list_elem elem;              /* List element that is linked to parent's
+                                           children list. */
+  };
+
+/* Struct for keeping information about the files opened by particular
+   process. Stored as a list element. */
+struct file_meta
+  {
+    int fd;                             /* File descriptor. */
+    struct file *file;                  /* File pointer. */
+    struct list_elem elem;              /* List element that is linked to thread's
+                                           files list. */
+  };
+
+/* Lock to make sure that only one process is accessing the filesystem. */
+struct lock filesys_lock;
+
+
+bool is_child (tid_t, struct thread *);
+struct child_meta *get_child (tid_t, struct thread *);
+void set_status (int);
+void clear_children (void);
+int add_file (struct file *);
+struct file_meta *get_file (int);
+struct file *remove_file (int);
+void clear_files (void);
+
+#define FD_ERROR -1
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
 
-bool is_child (tid_t, struct thread *);
-struct child_meta *get_child (tid_t, struct thread *);
-bool remove_child (tid_t, struct thread *);
-void set_status (int);
-
 void thread_init (void);
 void thread_start (void);
-
 void thread_tick (void);
 void thread_print_stats (void);
 
@@ -158,9 +187,11 @@ const char *thread_name (void);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
-typedef void thread_action_func (struct thread *t, void *aux);
 
+/* Performs some operation on thread t, given auxiliary data AUX. */
+typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
+
 int thread_get_priority (void);
 void thread_set_priority (int);
 

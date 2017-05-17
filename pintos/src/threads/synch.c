@@ -56,8 +56,7 @@ sema_init (struct semaphore *sema, unsigned value)
    This function may sleep, so it must not be called within an
    interrupt handler.  This function may be called with
    interrupts disabled, but if it sleeps then the next scheduled
-   thread will probably turn interrupts back on. This is
-   sema_down function. */
+   thread will probably turn interrupts back on. */
 void
 sema_down (struct semaphore *sema) 
 {
@@ -222,7 +221,6 @@ lock_try_acquire (struct lock *lock)
 }
 
 /* Releases LOCK, which must be owned by the current thread.
-   This is lock_release function.
 
    An interrupt handler cannot acquire a lock, so it does not
    make sense to try to release a lock within an interrupt

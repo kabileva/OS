@@ -12,21 +12,23 @@
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #include "threads/malloc.h"
+
 #ifdef USERPROG
 #include "userprog/process.h"
+#include "filesys/file.h"
 #endif
+
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
 #define THREAD_MAGIC 0xcd6abf4b
 
-/* Random value for basic thread
-   Do not modify this value. */
-#define THREAD_BASIC 0xd42df210
-
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 static struct list ready_list;
+
+/* List of all processes.  Processes are added to this list
+   when they are first scheduled and removed when they exit. */
 static struct list all_list;
 
 /* Idle thread. */
@@ -37,16 +39,14 @@ static struct thread *initial_thread;
 
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
-static void child_add (struct thread *);
-
 
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
-  {
+{
     void *eip;                  /* Return address. */
     thread_func *function;      /* Function to call. */
     void *aux;                  /* Auxiliary data for function. */
-  };
+};
 
 /* Statistics. */
 static long long idle_ticks;    /* # of timer ticks spent idle. */
@@ -71,22 +71,32 @@ static void init_thread (struct thread *, const char *name, int priority);
 static bool is_thread (struct thread *) UNUSED;
 static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
-void schedule_tail (struct thread *prev);
+void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
-/* Initializes the threading system by transforming the code
-   that's currently running into a thread.  This can't work in
-   general and it is possible in this case only because loader.S
-   was careful to put the bottom of the stack at a page boundary.
+static void add_child (struct thread *);
 
-   Also initializes the run queue and the tid lock.
+#define START_FD 2;
 
-   After calling this function, be sure to initialize the page
-   allocator before trying to create any threads with
-   thread_create().
+/* Add child to current thread. */
+void 
+add_child (struct thread *t) 
+{
+  /* Set the parent of created thread as current thread. */
+  t->parent = thread_current ();
 
-   It is not safe to call thread_current() until this function
-   finishes. */
+  /* Allocate memory for meta information of child, in case it terminates
+     and parent process needs its information. */
+  struct child_meta *cm = malloc (sizeof (struct child_meta));
+  cm->tid = t->tid;
+  cm->status = 0;
+  cm->wait = false;
+  cm->child = t;
+  sema_init (&cm->finished, 0);
+
+  /* Push the created thread into the children list of current thread. */
+  list_push_back (&running_thread ()->children, &cm->elem);
+}
 
 /* Checks if given thread ID is child of given thread. */
 bool 
@@ -103,7 +113,12 @@ is_child (tid_t tid, struct thread *t)
      to use the pointer. From the web - "The assignment will only do it 
      for immediate members of a structures and will fail to copy when you 
      have Complex datatypes in a structure. Here COMPLEX means that you
-      cant have array of pointers ,pointing to lists.". */ 
+      cant have array of pointers ,pointing to lists.". */
+
+  /* Parent thread terminated, then return null. */
+  if (t == NULL)
+    return false;
+ 
 
   struct list *children = &t->children; 
   struct list_elem *e;
@@ -114,7 +129,8 @@ is_child (tid_t tid, struct thread *t)
   {
     struct child_meta *cm = list_entry (e, struct child_meta, elem);
     /* If found, return true. */
-    if (cm->tid == tid) return true;
+    if (cm->tid == tid) 
+      return true;
   }
   /* Otherwise false. */
   return false;
@@ -126,6 +142,10 @@ is_child (tid_t tid, struct thread *t)
 struct child_meta *
 get_child (tid_t tid, struct thread *t)
 {
+  /* Parent thread terminated, then return null. */
+  if (!is_child (tid, t))
+    return NULL;
+
   struct list *children = &t->children;
   struct list_elem *e;
 
@@ -135,60 +155,11 @@ get_child (tid_t tid, struct thread *t)
   {
     struct child_meta *cm = list_entry (e, struct child_meta, elem);
     /* If found, return child meta information. */
-    if (cm->tid == tid) return cm;
+    if (cm->tid == tid) 
+      return cm;
   }
   /* Otherwise return NULL. */
   return NULL;
-}
-
-/* Remove child meta from children list of thread t, and 
-   deallocate allocated memory for the child meta struct. If
-   given tid thread is not child, or its lock is still acquaired,
-   then return false. */ 
-bool 
-remove_child (tid_t tid, struct thread *t)
-{
-  /* Check if child. */
-  if (is_child (tid, t) == false) return false;
-
-  /* Get child. */
-  struct child_meta *cm = get_child (tid, t);
-  ASSERT (cm != NULL);
-
-
-  /* Check if child is terminated, and, if so, remove it from
-     the children list and return true. */
-  if (sema_try_down (&cm->finished)) 
-  {
-    sema_up (&cm->finished);
-    list_remove (&cm->elem);
-    /* Free the allocated resoures for the child. */
-    free (cm);
-    return true;
-  }
-
-  /* Otherwise, return false. */
-  return false;
-}
-
-/* Add child to current thread. */
-static void 
-child_add (struct thread *t) 
-{
-  /* Set the parent of created thread as current thread. */
-  t->parent = thread_current ();
-
-  /* Allocate memory for meta information of child, in case it terminates
-     and parent process needs its information. */
-  struct child_meta *cm = malloc (sizeof (struct child_meta));
-  cm->tid = t->tid;
-  cm->status = -1;
-  cm->wait = false;
-  cm->child = t;
-  sema_init (&cm->finished, 0);
-
-  /* Push the created thread into the children list of current thread. */
-  list_push_back (&running_thread ()->children, &cm->elem);
 }
 
 /* Set the status for meta data of current thread for the parent,
@@ -198,23 +169,178 @@ child_add (struct thread *t)
 void 
 set_status (int status)
 {
+  enum intr_level old_level;
+  
+  old_level = intr_disable ();
   struct thread *t = thread_current ();
   
   /* TODO: Check if parent exists. */
-
   struct child_meta *cm = get_child (t->tid, t->parent);
   /* If no such child, then return. */
-  if (cm == NULL) return;
-
+  if (cm == NULL)
+  { 
+    intr_set_level (old_level); 
+    return;
+  }
   /* Set the status. */
   cm->status = status;
-
   /* Sema up the semaphore that is used to indicate whether this
      thread has been finished, or not. Used by parent process. */
   sema_up (&cm->finished);
+  intr_set_level (old_level);
 }
 
+/* Deallocate all the children meta information. */
+void
+clear_children (void) 
+{
+  enum intr_level old_level;
+  
+  old_level = intr_disable ();
+  struct list *children = &thread_current ()->children;
+  struct list_elem *e;
 
+  /* Iterate over all children of current thread. */
+  for (e = list_begin (children); e != list_end (children);
+   e = list_next (e))
+  {
+    struct child_meta *cm = list_entry (e, struct child_meta, elem);
+
+    /* Check if child still exists and set the child's parent field
+       to NULL and remove from the list and deallocate child meta. */
+    if (cm->child != NULL)
+      cm->child->parent = NULL;
+    list_remove (e);
+    /* NOTE: I have been struggling to find this bug for 3 hours
+       once again, shit. The loop defined above works directly
+       with struct e, that is being freed below, thus list_elem
+       modified and loop breaks (stops working as supposed to).
+      
+       free (cm);
+
+       Need to change this behaviour. BUG: Be carefull here.
+       Still not sure if this implementation works well. */
+    
+    struct list_elem temp = *e;
+    free (cm);
+    e = &temp;
+  }
+  intr_set_level (old_level);
+}
+
+/* Add file as opened to current thread. */
+int
+add_file (struct file *f)
+{
+  enum intr_level old_level;
+  
+  old_level = intr_disable ();
+  /* Allocate file meta for current file. */
+  struct file_meta *fm = malloc (sizeof (struct file_meta));
+
+  /* Initialize the file meta for current thread and add file
+     meta to the thread's files list. */
+  fm->fd = thread_current ()->fd++;
+  fm->file = f;
+  list_push_back (&thread_current ()->files, &fm->elem);
+
+  intr_set_level (old_level);
+  return fm->fd;
+}
+
+/* Get the file meta information with given fd. Returns 
+   NULL if no such fd acquired exists. */
+struct file_meta *
+get_file (int fd)
+{
+  enum intr_level old_level;
+  
+  old_level = intr_disable ();
+  struct list *files = &thread_current ()->files;
+  struct list_elem *e;
+  struct file_meta *fm = NULL;
+
+  /* For each file, check if it has tid same as given tid. */
+  for (e = list_begin (files); e != list_end (files);
+   e = list_next (e))
+  {
+    fm = list_entry (e, struct file_meta, elem);
+    /* If found, return child meta information. */
+    if (fm->fd == fd) 
+      break;
+  }
+  /* Otherwise return NULL. */
+  intr_set_level (old_level);
+  return fm;
+}
+
+/* Remove the file meta information with given fd. Returns
+   NULL if no such fd acquaired exists. */
+struct file *
+remove_file (int fd)
+{
+  enum intr_level old_level;
+  
+  old_level = intr_disable ();
+  struct file *f = NULL;
+  
+  /* Get the file meta and, if exists, remove it from the list. */
+  struct file_meta *fm = get_file (fd);
+
+  if (fm != NULL)
+  {
+    f = fm->file;
+    list_remove (&fm->elem);
+    free (fm);
+  }
+      
+  /* Otherwise return NULL. */
+  intr_set_level (old_level);
+  return f;
+}
+
+/* Deallocate all the file meta information, and close if open. */
+void
+clear_files (void) 
+{
+  enum intr_level old_level;
+  
+  old_level = intr_disable ();
+  struct list *files = &thread_current ()->files;
+  struct list_elem *e;
+
+  /* Iterate over all files meta objects. */
+  for (e = list_begin (files); e != list_end (files);
+   e = list_next (e))
+  {
+    struct file_meta *fm = list_entry (e, struct file_meta, elem);
+
+    /* Close file, if opened. BUG: compiler says file_close if 
+       not found. */
+    // file_close (fm->file);
+
+    /* Remove from the list and deallocate file meta. */
+    list_remove (&fm->elem);
+    struct list_elem temp = *e;
+    free (fm);
+    e = &temp;
+  }
+  intr_set_level (old_level);
+}
+
+/* Initializes the threading system by transforming the code
+   that's currently running into a thread.  This can't work in
+   general and it is possible in this case only because loader.S
+   was careful to put the bottom of the stack at a page boundary.
+
+   Also initializes the run queue and the tid lock.
+
+   After calling this function, be sure to initialize the page
+   allocator before trying to create any threads with
+   thread_create().
+
+   It is not safe to call thread_current() until this function
+   finishes. */
 void
 thread_init (void) 
 {
@@ -223,7 +349,7 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
-
+  lock_init (&filesys_lock);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -276,7 +402,7 @@ void
 thread_print_stats (void) 
 {
   printf ("Thread: %lld idle ticks, %lld kernel ticks, %lld user ticks\n",
-          idle_ticks, kernel_ticks, user_ticks);
+    idle_ticks, kernel_ticks, user_ticks);
 }
 
 /* Creates a new kernel thread named NAME with the given initial
@@ -296,7 +422,7 @@ thread_print_stats (void)
    Priority scheduling is the goal of Problem 1-3. */
 tid_t
 thread_create (const char *name, int priority,
-               thread_func *function, void *aux) 
+ thread_func *function, void *aux) 
 {
   struct thread *t;
   struct kernel_thread_frame *kf;
@@ -305,21 +431,23 @@ thread_create (const char *name, int priority,
   tid_t tid;
   enum intr_level old_level;
 
-
   ASSERT (function != NULL);
 
   /* Allocate thread. */
   t = palloc_get_page (PAL_ZERO);
+  // printf("allocated page for thread %s from kernel pool with pointer %p\n", name, t);
   if (t == NULL)
     return TID_ERROR;
 
-  /* Initialize thread. */
+  /* Initialize thread. NOTE: The order matters - we need to give
+     tid after we initialize thread, since we firstly set the memory
+     to 0 before setting the local variables in thread structure, 
+     thus assigning the tid happens after initialization. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
-
-   /* Add child. */
-  child_add (t);
-
+  
+  /* Add child. */
+  add_child (t);
 
   /* Prepare thread for first run by initializing its stack.
      Do this atomically so intermediate values for the 'stack' 
@@ -339,12 +467,13 @@ thread_create (const char *name, int priority,
   /* Stack frame for switch_threads(). */
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
+  sf->ebp = 0;
 
   intr_set_level (old_level);
 
-
   /* Add to run queue. */
   thread_unblock (t);
+
 
   return tid;
 }
@@ -426,16 +555,15 @@ void
 thread_exit (void) 
 {
   ASSERT (!intr_context ());
-
+  
 #ifdef USERPROG
   process_exit ();
 #endif
-
-  /* Just set our status to dying and schedule another process.
-     We will be destroyed during the call to schedule_tail(). */
+  /* Remove thread from all threads list, set our status to dying,
+     and schedule another process.  That process will destroy us
+     when it calls thread_schedule_tail(). */
   intr_disable ();
-    list_remove (&thread_current()->allelem);
-
+  list_remove (&thread_current()->allelem);
   thread_current ()->status = THREAD_DYING;
   schedule ();
   NOT_REACHED ();
@@ -446,18 +574,19 @@ thread_exit (void)
 void
 thread_yield (void) 
 {
-  struct thread *curr = thread_current ();
+  struct thread *cur = thread_current ();
   enum intr_level old_level;
   
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
-  if (curr != idle_thread) 
-    list_push_back (&ready_list, &curr->elem);
-  curr->status = THREAD_READY;
+  if (cur != idle_thread) 
+    list_push_back (&ready_list, &cur->elem);
+  cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
 }
+
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -474,7 +603,6 @@ thread_foreach (thread_action_func *func, void *aux)
     func (t, aux);
   }
 }
-
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
@@ -538,10 +666,10 @@ idle (void *idle_started_ UNUSED)
   sema_up (idle_started);
 
   for (;;) 
-    {
+  {
       /* Let someone else run. */
-      intr_disable ();
-      thread_block ();
+    intr_disable ();
+    thread_block ();
 
       /* Re-enable interrupts and wait for the next one.
 
@@ -555,8 +683,8 @@ idle (void *idle_started_ UNUSED)
 
          See [IA32-v2a] "HLT", [IA32-v2b] "STI", and [IA32-v3a]
          7.11.1 "HLT Instruction". */
-      asm volatile ("sti; hlt" : : : "memory");
-    }
+    asm volatile ("sti; hlt" : : : "memory");
+  }
 }
 
 /* Function used as the basis for a kernel thread. */
@@ -564,7 +692,7 @@ static void
 kernel_thread (thread_func *function, void *aux) 
 {
   ASSERT (function != NULL);
-                    
+
   intr_enable ();       /* The scheduler runs with interrupts off. */
   function (aux);       /* Execute the thread function. */
   thread_exit ();       /* If function() returns, kill the thread. */
@@ -577,7 +705,7 @@ running_thread (void)
   uint32_t *esp;
 
   /* Copy the CPU's stack pointer into `esp', and then round that
-     down to the start of a page.  Since `struct thread' is
+     down to the start of a page.  Because `struct thread' is
      always at the beginning of a page and the stack pointer is
      somewhere in the middle, this locates the curent thread. */
   asm ("mov %%esp, %0" : "=g" (esp));
@@ -596,22 +724,23 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
-
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
   
+  // printf("copying name %s in thread\n", name);
   memset (t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
-  t->fd = 2;
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
   list_init (&t->children);
-  list_init(&t->files);
-
+  list_init (&t->files);  
+  t->fd = START_FD; 
+  list_init(&t->mmap_list);
+  t->mmap_id = 0;
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -658,14 +787,14 @@ next_thread_to_run (void)
    After this function and its caller returns, the thread switch
    is complete. */
 void
-schedule_tail (struct thread *prev) 
+thread_schedule_tail (struct thread *prev)
 {
-  struct thread *curr = running_thread ();
+  struct thread *cur = running_thread ();
   
   ASSERT (intr_get_level () == INTR_OFF);
 
   /* Mark us as running. */
-  curr->status = THREAD_RUNNING;
+  cur->status = THREAD_RUNNING;
 
   /* Start new time slice. */
   thread_ticks = 0;
@@ -681,33 +810,33 @@ schedule_tail (struct thread *prev)
      initial_thread because its memory was not obtained via
      palloc().) */
   if (prev != NULL && prev->status == THREAD_DYING && prev != initial_thread) 
-    {
-      ASSERT (prev != curr);
-      palloc_free_page (prev);
-    }
+  {
+    ASSERT (prev != cur);
+    palloc_free_page (prev);
+  }
 }
 
 /* Schedules a new process.  At entry, interrupts must be off and
    the running process's state must have been changed from
    running to some other state.  This function finds another
    thread to run and switches to it.
-   
-   It's not safe to call printf() until schedule_tail() has
-   completed. */
+
+   It's not safe to call printf() until thread_schedule_tail()
+   has completed. */
 static void
 schedule (void) 
 {
-  struct thread *curr = running_thread ();
+  struct thread *cur = running_thread ();
   struct thread *next = next_thread_to_run ();
   struct thread *prev = NULL;
 
   ASSERT (intr_get_level () == INTR_OFF);
-  ASSERT (curr->status != THREAD_RUNNING);
+  ASSERT (cur->status != THREAD_RUNNING);
   ASSERT (is_thread (next));
 
-  if (curr != next)
-    prev = switch_threads (curr, next);
-  schedule_tail (prev); 
+  if (cur != next)
+    prev = switch_threads (cur, next);
+  thread_schedule_tail (prev);
 }
 
 /* Returns a tid to use for a new thread. */

@@ -5,6 +5,10 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+#include "threads/vaddr.h"
+#include "userprog/syscall.h"
+#include "vm/page.h"
+
 /* Number of page faults processed. */
 static long long page_fault_cnt;
 
@@ -147,26 +151,47 @@ page_fault (struct intr_frame *f)
   not_present = (f->error_code & PF_P) == 0;
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
-
-  /* According to the reference, copy former eax to eip
-  and set eax to 0xffffffff */
-  
-  if(page_fault_cnt>0) {
-      f->eip = f->eax;
-      f->eax = 0xffffffff;
+  // printf("exception with fault_addr %p PHYS_BASE %p in thread %s\n", fault_addr, PHYS_BASE, thread_name ());
+ // printf("%d, %d, %d\n", not_present, write, user);
+  // printf("not_present %d write %d user %d\n", not_present, write, user);
+  if (not_present && fault_addr > ((void *) 0x08048000) &&
+      is_user_vaddr (fault_addr))
+  {
+    // printf("exception1\n");
+    struct spte *spte = get_page (fault_addr);
+    // printf("spte %p\n", spte);
+    if (!spte && fault_addr >= f->esp - 32)
+    {
+      // printf("grow stack\n");
+      fault_addr = pg_round_down (fault_addr);
+      
+      if (PHYS_BASE - fault_addr > MAX_STACK_SIZE)
+        sys_exit (ERROR);
+      spte = create_page (fault_addr, PAL_USER | PAL_ZERO, WRITABLE | SWAP);
+      // printf("exception.c: spte->swap_idx = LOADED;\n");
+      spte->swap_idx = LOADED;
     }
-
-/* This condition passes bad-write test */
-  
-  if(!user || !write || not_present) {
-    exit(-1);
+     //printf("try loading page %p with spte->upage %p\n", spte, spte->upage);
+    if (spte && load_page (spte))
+    {
+      
+     // printf("success loading page\n");
+      return;
     }
+    // printf("failed in loaing the page\n");
+    sys_exit (ERROR);
+  }
 
-/* This condition passes bad-write2 test */
 
-  if(!user || !write || !not_present) {
-    exit(-1);
-    }
+  /* If the exception was caused by the user, then terminate
+     current process with ERROR. NOTE: for future, there could
+     be some modifications to this code part, since this will
+     exit the process whenever there is a page fault. */
+
+  if (user || !not_present)
+    sys_exit (ERROR);
+  if(not_present) sys_exit (ERROR);
+
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */

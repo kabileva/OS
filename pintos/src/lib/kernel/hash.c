@@ -102,8 +102,9 @@ hash_insert (struct hash *h, struct hash_elem *new)
   struct hash_elem *old = find_elem (h, bucket, new);
 
   if (old == NULL) 
+    //printf("No old\n");
     insert_elem (h, bucket, new);
-
+  //printf("there is old\n");
   rehash (h);
 
   return old; 
@@ -143,7 +144,7 @@ hash_find (struct hash *h, struct hash_elem *e)
    responsibility to deallocate them. */
 struct hash_elem *
 hash_delete (struct hash *h, struct hash_elem *e)
-{
+{ 
   struct hash_elem *found = find_elem (h, find_bucket (h, e), e);
   if (found != NULL) 
     {

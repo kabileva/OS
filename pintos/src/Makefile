@@ -17,10 +17,10 @@ TAGS_SUBDIRS = $(BUILD_SUBDIRS) devices lib
 TAGS_SOURCES = find $(TAGS_SUBDIRS) -name \*.[chS] -print
 
 TAGS::
-	etags `$(TAGS_SOURCES)`
+	etags --members `$(TAGS_SOURCES)`
 
 tags::
-	ctags `$(TAGS_SOURCES)`
+	ctags -T --no-warn `$(TAGS_SOURCES)`
 
 cscope.files::
 	$(TAGS_SOURCES) > cscope.files

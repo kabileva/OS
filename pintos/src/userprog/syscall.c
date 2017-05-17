@@ -3,404 +3,581 @@
 #include <syscall-nr.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
-#include "threads/vaddr.h"
+
+#include "devices/shutdown.h"
 #include "userprog/process.h"
-#include <lib/kernel/console.h>
-#include "threads/synch.h"
 #include "filesys/filesys.h"
 #include "filesys/file.h"
+#include "devices/input.h"
+#include "threads/vaddr.h"
+#include "userprog/pagedir.h"
+#include "vm/page.h"
 
-static int get_user(const uint8_t* uaddr);
-
-static int ptr_to_int(const void*);
-static void sys_exit(int);
-static void sys_write(struct intr_frame *f);
-static void sys_filesize(struct intr_frame* f);
 static void syscall_handler (struct intr_frame *);
-static void sys_create(struct intr_frame *f);
-static void sys_open(struct intr_frame *f);
-static void sys_read(struct intr_frame *f);
-static void sys_remove(struct intr_frame *f);
-static int get_arg (void *);
-static void sys_exit (int);
+
+static int get_arg (void *, void *);
+static void check_arg (void *, void *);
 static int sys_exec (char *);
-static int sys_wait (struct intr_frame* f);
-static int push_file(struct file* file);
-static void sys_close(struct intr_frame* f);
-static void sys_seek(int fd, unsigned position);
-static void sys_tell(struct intr_frame* f);
-static struct fd* find_file(struct list* files, int file_descriptor);
-static struct lock files_lock;
-
-#define WORD_SIZE 4
-
- /*For storing the file together with its descriptor 
- and list_elem elem to use it in the list */ 
-static struct fd {
-	struct file* file; 
-	int descriptor;
-	struct list_elem elem;
-};
-
-void exit(int code)
-{
-	sys_exit(code);
-}
+static int sys_wait (tid_t);
+static bool sys_create (char *, unsigned);
+static bool sys_remove (char *);
+static int sys_open (char *);
+static int sys_filesize (int);
+static int sys_read (int, char *, unsigned);
+static int sys_write (int, char *, unsigned);
+static void sys_seek (int, unsigned);
+static unsigned sys_tell (int);
+static void sys_close (int);
+void munmap ();
 
 void
 syscall_init (void) 
 {
-  intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
-  lock_init(&files_lock);
-
+	intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
 static void
 syscall_handler (struct intr_frame *f UNUSED) 
 {
-	int reg = ptr_to_int(f->esp); 
-	/* Switch the sys calls according to the value of register*/
-	switch(reg)
-	{
-
-	case SYS_EXIT:
-	{
-		/* Get first argument. */
-		int status = ptr_to_int(f->esp+WORD_SIZE);
-		sys_exit (status);
-		break;
-	}
-	case SYS_WRITE: 
-		sys_write(f); 
-		break;
-	case SYS_CREATE:
-		sys_create(f);
-		break;
-	case SYS_OPEN:
-		sys_open(f);
-		break;
-	case SYS_CLOSE:
-		sys_close(f);
-		break;
-	case SYS_READ:
-		sys_read(f);
-		break;
-	case SYS_REMOVE:
-		sys_remove(f);
-		break;
-	case SYS_WAIT:
-		f->eax = sys_wait(f);
-		break;
-	case SYS_EXEC:
-		f->eax = sys_exec ((char *) ptr_to_int (f->esp + WORD_SIZE));
-		break;
-	case SYS_FILESIZE: 
-		sys_filesize(f);
-		break;
-	case SYS_SEEK: 
-		sys_seek(ptr_to_int(f->esp+4), (unsigned)ptr_to_int(f->esp+8));
-		break;
-	case SYS_TELL: 
-		sys_tell(f);
-		break;
-	case SYS_HALT:
-		break;
-	default:
+	/* Get the syscall code. */
+	int code = get_arg (f->esp, f->esp);
+	switch (code) {
+		case SYS_HALT:
 		{
- 		exit(-1);
+			/* Halt the system. */
+			shutdown_power_off ();
+			break;
 		}
-	}
+		case SYS_EXIT:
+		{	
+			/* Get first argument. */
+			int status = get_arg (f->esp + WORD_SIZE, f->esp);
+			sys_exit (status);
+			break;
+		}
+		case SYS_EXEC:
+		{
+			/* Get first argument. */
+			char *file_name = (char *) get_arg (f->esp + WORD_SIZE, f->esp);
+
+			/* Check the pointer. */
+			check_arg (file_name, f->esp);
+
+			/* I was looking in the for the information as to where save
+			   return value from the sys_call. Couldn't find any except
+			   in internet. Seems like f->eax is place where we should
+			   store the return value. Keep in mind that we should store
+			   there the return value as int, right in the memory. NOTE:
+			   Read online and found that in IAx32 systems, the return
+			   scheme differs based on the return type - integral type or
+			   pointer will be stored in eax register | floating-point and
+			   structures will be stored in floating point register and on
+			   stack correspondigly, but seemingly, we don't have to deal
+			   with two latter cases here. So just store the return value
+			   in f->eax. */
+			f->eax = sys_exec (file_name);
+			break;
+		}
+		case SYS_WAIT:
+		{
+			/* NOTE: used tid_t instead of pid_t. I don't see any problem
+			   that it could cause. */
+
+			/* Get first argument. */
+			tid_t tid = get_arg (f->esp + WORD_SIZE, f->esp);
+
+			f->eax = sys_wait (tid);
+			break;
+		}
+		case SYS_CREATE:
+		{
+			/* Get arguments. */
+			char *file = (char *) get_arg (f->esp + WORD_SIZE, f->esp);
+			unsigned init_size = (unsigned) get_arg (f->esp + 
+												2 * WORD_SIZE, f->esp);
+
+			/* Check the pointer. */
+			check_arg (file, f->esp);			
+
+			lock_acquire (&filesys_lock);
+			f->eax = sys_create (file, init_size);
+			lock_release (&filesys_lock);
+			break;
+		}
+		case SYS_REMOVE:
+		{
+			/* Get first argument. */
+			char *file = (char *) get_arg (f->esp + WORD_SIZE, f->esp);
+
+			/* Check the pointer. */
+			check_arg (file, f->esp);			
+
+			lock_acquire (&filesys_lock);
+			f->eax = sys_remove (file);
+			lock_release (&filesys_lock);
+			
+			break;
+		}
+		case SYS_OPEN:
+		{
+			/* Get first argument. */
+			char *file = (char *) get_arg (f->esp + WORD_SIZE, f->esp);
+
+			/* Check the pointer. */
+			check_arg (file, f->esp);			
+
+			lock_acquire (&filesys_lock);
+			f->eax = sys_open (file);
+			lock_release (&filesys_lock);
+			break;	
+		}
+		case SYS_FILESIZE:
+		{
+			/* Get first argument. */
+			int fd = get_arg (f->esp + WORD_SIZE, f->esp);
+			
+			lock_acquire (&filesys_lock);
+			f->eax = sys_filesize (fd);
+			lock_release (&filesys_lock);
+			break;
+		}
+		case SYS_READ:
+		{
+			/* Get arguments. */
+
+			int fd = get_arg (f->esp + WORD_SIZE, f->esp);
+
+			char *buf = (char *) get_arg (f->esp + 2 * WORD_SIZE, f->esp);
+			
+			unsigned size = (unsigned) get_arg (f->esp + 3 * WORD_SIZE, f->esp);
+			
+			/* Check the pointer. */
+			check_arg (buf, f->esp);
+						
+			lock_acquire (&filesys_lock);
+			f->eax = sys_read (fd, buf, size);
+			lock_release (&filesys_lock);
+			break;
+		}
+		case SYS_WRITE:
+		{	
+			/* Get arguments. */
+			int fd = get_arg (f->esp + WORD_SIZE, f->esp);
+			char *buf =  (char *) get_arg (f->esp + 2 * WORD_SIZE, f->esp);
+			unsigned size = (unsigned) get_arg (f->esp + 3 * WORD_SIZE, f->esp);
+			/* Check the pointer. */
+			check_arg (buf, f->esp);			
+			lock_acquire (&filesys_lock);
+			f->eax = sys_write (fd, buf, size);
+			lock_release (&filesys_lock);
+			break;
+		}
+		case SYS_SEEK:
+		{
+			/* Get arguments. */
+			int fd = get_arg (f->esp + WORD_SIZE, f->esp);
+			unsigned pos = (unsigned) get_arg (f->esp + 2 * WORD_SIZE, f->esp);
+			
+			lock_acquire (&filesys_lock);
+			sys_seek (fd, pos);
+			lock_release (&filesys_lock);
+			break;
+		}
+		case SYS_TELL:
+		{
+			/* Get first argument. */
+			int fd = get_arg (f->esp + WORD_SIZE, f->esp);
+			
+			lock_acquire (&filesys_lock);
+			f->eax = sys_tell (fd);
+			lock_release (&filesys_lock);
+			break;
+		}
+		case SYS_CLOSE:
+		{	
+			/* Get first argument. */
+			int fd = get_arg (f->esp + WORD_SIZE, f->esp);
+			
+			lock_acquire (&filesys_lock);
+			sys_close (fd);
+			lock_release (&filesys_lock);
+			break;
+		}
+
+		case SYS_MMAP:
+      	{
+      	int fd = get_arg (f->esp + WORD_SIZE, f->esp);
+      	int arg = get_arg (f->esp + 2*WORD_SIZE, f->esp);
+        check_arg(f->esp+WORD_SIZE,f->esp);
+        check_arg(f->esp+2*WORD_SIZE,f->esp);
+        f->eax = mmap(fd,arg);
+        break;
+	     }
+
+	    case SYS_MUNMAP:
+	    {
+	        check_arg(f->esp+ WORD_SIZE,f->esp);
+	        munmap();
+	        break;
+	    }
+	    
+		// case SYS_CHDIR:
+		// {
+		// 	break;
+		// }
+		// case SYS_MKDIR:
+		// {
+		// 	break;
+		// }         
+		// case SYS_READDIR:
+		// {
+		// 	break;
+		// }         
+		// case SYS_ISDIR:
+		// {
+		// 	break;
+		// }
+		// case SYS_INUMBER:
+		// {
+		// 	break;
+		// }
+	} 
+
 }
 
+/* Check if given address belongs to user virtual address and is from
+   current thread's page directory. If not, then exit with error. */
+void
+check_arg (void *p, void *esp)
+{
+	if (!is_user_vaddr (p) || p < ((void *) 0x08048000))
+    	sys_exit (ERROR);
+   
+    struct spte *spte = get_page (esp);
 
+    if (!spte)
+    	sys_exit (ERROR);
 
-/* For pushing the file in the list with all filed of the current thread
-and uncrementing the fd (needed for open-twice and close-twice test, because every time the file opens 
-it should have different fds).
-Returns the new fd of a given file */
-static int push_file(struct file* file) {
-	struct fd* fd = malloc(sizeof(struct fd));
-	lock_acquire(&files_lock);
-	fd->file = file;
+    spte = get_page (p);
+    if (spte && spte->swap_idx == LOADED)
+    	return;
+ 
+    if (!spte && p >= esp - 32)
+    {
+		void *page_p = pg_round_down (p);
 
-	fd->descriptor = thread_current()->fd;
-	thread_current()->fd++;
+		if (PHYS_BASE - page_p > MAX_STACK_SIZE)
+			sys_exit (ERROR);
+		
+		spte = create_page (page_p, PAL_USER, WRITABLE | SWAP);
+    }
+    if (spte && load_page (spte))
+    {
+    	return;
+    }
 
-	list_push_back(&thread_current()->files, &fd->elem);
-	lock_release(&files_lock);
-
-	return fd->descriptor;
+    sys_exit (ERROR);
 }
 
-/* Opens the file with the given name. Returns -1 if the file is NULL.
-Does nothing if the name is NULL */
-static void sys_open(struct intr_frame *f) {
-	
-	/* Pull arguments from stack */
-	char *name = (char*)ptr_to_int(f->esp+WORD_SIZE);
-	struct file* file;
-
-	if(name==NULL) return;
-	lock_acquire(&files_lock);
-	/* Try to open the file */
-	file = filesys_open(name);
- 	lock_release(&files_lock);
-	if(file==NULL) 
-		f->eax = -1;
-	else 
-		f->eax = push_file(file);
-	return;
+/* Get the value from stack that is placed as size of integer. Check if 
+   the pointer obtained belongs to user virtual address. */
+int
+get_arg (void *p, void *esp)
+{	
+	check_arg (p, esp);
+	return *((int *) p);
 }
 
-static void sys_remove(struct intr_frame *f) {
-		lock_acquire(&files_lock);
-		const char* name = (const char*)ptr_to_int(f->esp+WORD_SIZE);
-		f->eax = filesys_remove(name);
-		lock_release(&files_lock);
-		return;
-
-}
-
-static void 
+/* Function that is called when SYS_EXIT invoked. Exits current thread.
+   If parent waits for the thread, status will be returned to parent. */ 
+void 
 sys_exit (int status)
 {
 	/* Print exit message. */
 	printf ("%s: exit(%d)\n", thread_name (), status);
+	/* Set the status of current terminating thread. */
 	set_status (status);
-	struct fd* fd;
-	struct list_elem* e = list_begin(&thread_current()->files);
-
-	while(e != list_end(&thread_current()->files))
+	if (lock_held_by_current_thread (&filesys_lock))
 	{
-		fd = list_entry(e, struct fd, elem);
-		e = list_remove(e);
-		file_close(fd->file);
-		free(fd);
+		lock_release (&filesys_lock);
 	}
 	thread_exit ();
 }
 
-static void sys_read(struct intr_frame *f) {
-
-	char* buf;
- 	size_t size;
-
- 	/* Pull arguments from stack */
-
-	int fd = ptr_to_int(f->esp+WORD_SIZE);
- 	size= ptr_to_int(f->esp+3*WORD_SIZE);
- 	buf = ptr_to_int(f->esp+2*WORD_SIZE);
-
- 	 /* Validate the pointer */
-
- 	if (buf+size > PHYS_BASE) exit(-1);
-
- 	if (size==0) {
- 		f->eax = 0;
- 		return;
- 	}
- 	if (!lock_held_by_current_thread (&files_lock)) 
-		lock_acquire(&files_lock);
-
- 	if (fd == 1) {
- 		f->eax = size;
- 		lock_release(&files_lock);
- 		return;
- 	}
- 	else {
- 		struct fd* file_descriptor = find_file(&thread_current()->files, fd);
- 		f->eax = file_read(file_descriptor->file, buf, size);
- 		lock_release(&files_lock);
- 		return;
- 	}
-
- 	
-}
-
-/* Creates the file with the given name and size;
-   Returns true if successful, false otherwise.
-   Fails if a file named NAME already exists,
-   or if internal memory allocation fails */
-static void sys_create(struct intr_frame *f) {
-	bool created;
-	/* Pull arguments from stack */
-	char *file = (char*)ptr_to_int(f->esp+WORD_SIZE);
-
-	int initial_size = (size_t)ptr_to_int(f->esp+2*WORD_SIZE);
-
-	lock_acquire(&files_lock);
-	if(file==NULL) exit(-1);
-	created = filesys_create (file,initial_size); 
-	lock_release(&files_lock);
-
-	f->eax = created;
-}
-
-/* Writes either to console or to the file. Returns -1 if failed,
-size in bytes of the written text if successfull */
- static void sys_write(struct intr_frame *f)
- {
- 	const char* buf;
- 	size_t size;
-
- 	size= ptr_to_int(f->esp+3*WORD_SIZE);
- 	buf = ptr_to_int(f->esp+2*WORD_SIZE);
-
- 	/*Check the pointer and if it is possible to write the whole text there */
- 	if(buf+size > PHYS_BASE ) exit(-1);
-
- 	/* Return if null text is given to write */
- 	if(size<=0) {
- 		f->eax = 0;
- 		return; 
- 	} 
- 	int fd = ptr_to_int(f->esp+WORD_SIZE);
-
- 	/* Return an error */
- 	if (fd==0) 
- 		f->eax=-1;
-
- 	/*Write to console */
- 	else if (fd==1) {
- 		putbuf(buf, size);
-		f->eax = size;
-	}
-	/*Write to file */
-	else {
-		/*Find the file and if it exists write to it */
-		struct fd* file_descriptor = find_file(&thread_current()->files, fd);
-		lock_acquire(&files_lock);
-		f->eax = file_write(file_descriptor->file, buf, size);
-		lock_release(&files_lock);		
-	}
-}	
-
-/*Close the file with the given fd and remove fd from the list */
-static void sys_close(struct intr_frame *f)
-{
-	int file_descriptor = ptr_to_int(f->esp+WORD_SIZE);
-	struct fd* fd = find_file(&thread_current()->files, file_descriptor);
-
-	if(fd)
-	{
-		lock_acquire(&files_lock);
-		file_close(fd->file);
-		lock_release(&files_lock);
-		list_remove(&fd->elem);
-		free(fd);
-	}
-}
-
-/* Function for findint the file desctiptor in the list of files of the current
-thread. Returns NULL if nothing was found, struct fd if the descriptor was found */
-static struct fd* find_file(struct list* files, int file_descriptor) {
-	struct fd* fd = NULL;
-	struct fd* tmp = malloc(sizeof(struct fd));
-
-	struct list_elem* e =  list_begin(&thread_current()->files);
-	for(e = list_begin(&thread_current()->files);
-			e != list_end(&thread_current()->files);
-			e = list_next(e))
-	{
-		tmp = list_entry(e, struct fd, elem);
-		if (tmp->descriptor == file_descriptor )
-		{
-			fd = tmp;
-			break;
-		}
-	}
-	return fd;
-
-}
-
-
-int
-sys_wait (struct intr_frame* f) 
-{	
-	/* NOTE: Read 3.3.4 about this system call. */
-
-	/* Wait for the given tid to terminate. */
-
-	tid_t tid = ptr_to_int(f->esp+WORD_SIZE);
-
-	return process_wait (tid);
-}
-
-   
-/* Executes the file with a given file_name*/
+/* Function that is called when SYS_EXEC invoked. Executes given file. */
 int
 sys_exec (char *file_name) 
 {
-
+	/* Execute the command line given. */
 	return process_execute (file_name);
 }
 
-
-/* Returns the file_length of the file with given fd (size in bytes),
-returns -1 if the file doesn't exist */
-
-static void sys_filesize(struct intr_frame *f)
-{
-	int fd = ptr_to_int(f->esp+WORD_SIZE);
-	struct fd* file_descriptor = find_file(&(thread_current()->files), fd);
-	f->eax = -1;
-	if (file_descriptor)
-		f->eax = file_length(file_descriptor->file);
+/* Function that is called when SYS_WAIT invoked. Wait for given process
+   to terminate. */
+int
+sys_wait (tid_t tid)
+{	
+	/* Wait for the given tid to terminate. */
+	return process_wait (tid);
 }
 
-/* Sets the current position in file with given fd to position bytes from the
-   start of the file. */
-static void sys_seek(int fd, unsigned position)
+/* Function that is called when SYS_CREATE invoked. Create new file with
+   initial size of init_size. Returns true, if successful, false
+   otherwise. Does not open the file, although creates it. */
+bool
+sys_create (char *file, unsigned init_size) 
 {
+	/* Create file. */
+	return filesys_create (file, init_size);
+}
 
-	struct fd* file_descriptor = find_file(&thread_current()->files, fd);
-	if(file_descriptor)
+/* Function that is called when SYS_REMOVE invoked. Deletes the file
+   Returns true if successful, false otherwise. File may be removed
+   regardless of whether it is open or closed, and removing an open
+   file does not close it. */
+bool
+sys_remove (char *file) 
+{
+	/* NOTE: Currently, I didn't figure out whether following function
+	   somehow affects the file accessibility, if opened by any other
+	   threads, so TODO: figure it out in future. */
+	
+	/* Remove file. */
+	return filesys_remove (file);
+}
+
+/* Function that is called when SYS_OPEN invoked. Returns a file
+   descriptor (nonnegative integer), or -1 if file couldn't be opened.
+   Shouldn't return 0, or 1, which are reserved for console. */
+int
+sys_open (char *file)
+{
+	/* NOTE: Currently, I didn't figure out whether following function
+	   somehow affects the file accessibility, if opened by any other
+	   threads, so TODO: figure it out in future. */
+	
+	/* Get the file. */
+	struct file *f = filesys_open (file);
+
+	/* If openm faile, return error. */
+	if (f == NULL)
+		return ERROR;
+
+	/* Add the file as opened file to thread, and return fd. */
+	return add_file (f);
+}  
+
+/* Function that is called when SYS_FILESIZE invoked. Returns size
+   of the file, if this thread owns the file, 0 otherwise. NOTE:
+   still do not know whether of current thread doesn't own the file
+   descriptor given. */
+int
+sys_filesize (int fd)
+{
+	/* Get the opened file by current thread. */
+	struct file_meta *fm = get_file (fd);
+
+	/* If current thread doesn't own the file, return error. */
+	if (fm == NULL)
+		return ERROR;
+	
+	/* Get the size. */
+	return file_length (fm->file);
+}
+
+/* Function that is called when SYS_READ invoked. Returns the number
+   of bytes actually read. */
+int
+sys_read (int fd, char *buf, unsigned size)
+{
+	/* If the read from stdin, then read from keyboard. */
+	if (fd == STDIN_FILENO)
 	{
-		lock_acquire(&files_lock);
-		file_seek(file_descriptor->file, position);
-		lock_release(&files_lock);
+		unsigned i;
+
+		/* Create local buffer with uint8_t to map the input_getc
+		   function return value. */
+		uint8_t *loc = (uint8_t *) buf;
+		for (i = 0; i < size; i++) {
+			loc[i] = input_getc ();
+		}
+
+		/* Return the number of bytes written. */
+		return size;
 	}
+
+	/* If the read from stdout, then return error. */
+	if (fd == STDOUT_FILENO)
+		sys_exit (ERROR);
+
+	/* Otherwise it is file descriptor. Get the opened file by 
+	   current thread. */
+	struct file_meta *fm = get_file (fd);
+
+
+	/* If current thread doesn't own the file, then return 0. */
+	if (fm == NULL) 
+		sys_exit (ERROR);
+
+	/* Read the file, and return the number of bytes actually read.
+	   Might be less than size, if EOF reached. */
+	return file_read (fm->file, buf, size);
 }
 
-/* Returns the current position in FILE with given fd as a byte offset from the
-   start of the file. */
-static void sys_tell(struct intr_frame *f)
+
+
+/* Function that is called when SYS_CALL invoked. Returns the number
+   of bytes actually written. */
+int 
+sys_write (int fd, char *buf, unsigned size) 
 {
-	int fd = ptr_to_int(f->esp+WORD_SIZE);
-	struct fd* file_descriptor = find_file(&thread_current()->files, fd);
-	f->eax = 0;
-	if(file_descriptor)
+	/* If the write to stdin, then return error. */
+	if (fd == STDIN_FILENO)
 	{
-		lock_acquire(&files_lock);
-		f->eax = file_tell(file_descriptor->file);
-		lock_release(&files_lock);
+		sys_exit (ERROR);
+	}
+
+
+
+	/* If output is for console. */ 
+	if (fd == STDOUT_FILENO)
+	{
+		putbuf(buf, size);
+		/* TODO: Implement checking for the actually number of bytes
+		   written. */
+		return (int) size;
 	}
 	
+	/* Otherwise it is file descriptor. Get the opened file by 
+	   current thread. */
+	struct file_meta *fm = get_file (fd);
+
+	/* If current thread doesn't own the file, then return error. */
+	if (fm == NULL) 
+		sys_exit (ERROR);
+
+	return file_write (fm->file, buf, size);
 }
 
-/* Function for converting esp register to the int value and checking
-if it's below the PHYS_BASE */
-
-static int ptr_to_int(const void* ptr)
+/* Function that is called when SYS_SEEK invoked. Changes the next
+   byte to be read or written in open file fd to position expressed
+   in bytes. */
+void 
+sys_seek (int fd, unsigned pos) 
 {
-	if (ptr>= PHYS_BASE) exit(-1);
-	int i;
-	/*Check every byte of the word */
-	for (i = 0; i < 4; ++i)
+	/* If the file is stdout or stdin, then return error. */
+	if (fd == STDIN_FILENO || fd == STDOUT_FILENO)
 	{
-		if (get_user(ptr+i) == -1)
-			exit(-1);
+		sys_exit (ERROR);
 	}
-	return *((int *)ptr);
+
+	/* Otherwise it is file descriptor. Get the opened file by 
+	   current thread. */
+	struct file_meta *fm = get_file (fd);
+
+	/* If current thread doesn't own the file, then return error. */
+	if (fm == NULL) 
+		sys_exit (ERROR);
+
+	file_seek (fm->file, pos);
 }
 
-/*Code from the reference */
-static int get_user(const uint8_t* uaddr)
+/* Function that is called when SYS_TELL invoked. Return the
+   position of the next byte to be read or written in open file fd,
+   expressed in bytes from the beginning of the file. */
+unsigned 
+sys_tell (int fd) 
 {
-	int result;
-	asm("movl $1f, %0; movzbl %1, %0; 1:"
-			: "=&a" (result) : "m" (*uaddr));
-	return result;
+	/* If the file is stdout or stdin, then return error. */
+	if (fd == STDIN_FILENO || fd == STDOUT_FILENO)
+		sys_exit (ERROR);
+
+	/* Otherwise it is file descriptor. Get the opened file by 
+	   current thread. */
+	struct file_meta *fm = get_file (fd);
+
+	/* If current thread doesn't own the file, then return error. */
+	if (fm == NULL) 
+		sys_exit (ERROR);
+
+	return file_tell (fm->file);
 }
 
- 
+/* Function that is called when SYS_CLOSE invoked. Closes file
+   descriptor fd. */
+void
+sys_close (int fd) 
+{
+	/* If the file is stdout or stdin, then return error. */
+	if (fd == STDIN_FILENO || fd == STDOUT_FILENO)
+		sys_exit (ERROR);
+
+	/* Otherwise it is file descriptor. Remove the file meta
+	   struct. It might be removed before, but that's just fine. */
+	struct file *f = remove_file (fd);
+
+	/* If successfull, then close file. */
+	file_close (f);
+}
+
+void munmap ()
+{
+  remove_mmap();
+}
+
+
+int mmap (int fd, void *upage)
+{
+  struct file_meta *fm = get_file(fd);
+  struct file *file = fm->file;
+  if (!file) return -1;
+  if (((uint32_t) upage % PGSIZE) != 0 || !is_user_vaddr(upage) || 
+      upage < ((void *) 0x08048000))
+    return -1;
+  struct file *file_reopened = file_reopen(file);
+  uint32_t read_bytes = file_length(file_reopened);
+  int32_t ofs = 0;
+  uint32_t curr_read_bytes;
+  thread_current()->mmap_id++;
+  while (read_bytes > 0)
+    {
+    if (read_bytes<PGSIZE) 
+    	curr_read_bytes = read_bytes;
+    else 
+    	curr_read_bytes = PGSIZE;
+    
+       if (!page_add_mmap(file_reopened, ofs, upage, curr_read_bytes, PGSIZE - curr_read_bytes))
+        {
+          munmap(thread_current()->mmap_id);
+          return -1;
+        }
+      upage += PGSIZE;
+      read_bytes -= curr_read_bytes;    	
+      ofs += curr_read_bytes;
+    }
+  return thread_current()->mmap_id;
+}
+
+void remove_mmap ()
+{
+  struct thread *curr = thread_current();
+  struct list_elem *next, *e = list_begin(&curr->mmap_list);
+  struct file *f = NULL;
+  while(!list_empty(&curr->mmap_list))
+  for (e = list_begin(&curr->mmap_list);
+       e != list_end(&curr->mmap_list); e = next)
+  {
+    struct mmap_file *mm = list_entry (e, struct mmap_file, elem);
+	if(!mm->spte->hash_error)
+         hash_delete(&curr->spt, &mm->spte->elem);
+      if (mm->spte)
+      {
+        if (pagedir_is_dirty(curr->pagedir, mm->spte->upage))
+          file_write_at(mm->spte->file, mm->spte->upage,
+              mm->spte->read_bytes, mm->spte->ofs);
+      }
+      list_remove(&mm->elem);
+          next = list_next(e);
+  }
+}
+
