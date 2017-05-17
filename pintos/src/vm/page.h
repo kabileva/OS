@@ -40,14 +40,12 @@ struct spte
 	uint32_t zero_bytes;		/* Zero bytes in file. */
 	bool hash_error;
 	struct hash_elem elem;		/* Hash element to manipulate hash SPT. */
+
+	/* For tracking mmaping */
+	
+	struct list_elem l_elem;
 	int mmap_id;
 };
-struct mmap_file {
-  struct spte *spte;
-  int mmap_id;
-  struct list_elem elem;
-};
-
 
 void spt_init (void);
 void* create_page (void *, enum palloc_flags, enum spte_flags);
@@ -55,7 +53,5 @@ struct spte *get_page (void *);
 bool load_page (struct spte *);
 void free_page (struct spte *);
 void spt_destroy (void);
-void* page_add_mmap(struct file *file, int32_t ofs, uint8_t *upage,
-                  uint32_t read_bytes, uint32_t zero_bytes);
 
 #endif

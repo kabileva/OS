@@ -28,7 +28,7 @@ static int sys_write (int, char *, unsigned);
 static void sys_seek (int, unsigned);
 static unsigned sys_tell (int);
 static void sys_close (int);
-void munmap ();
+int mmap (int fd, void *upage);
 
 void
 syscall_init (void) 
@@ -206,12 +206,10 @@ syscall_handler (struct intr_frame *f UNUSED)
 
 		case SYS_MMAP:
       	{
-      	int fd = get_arg (f->esp + WORD_SIZE, f->esp);
-      	int arg = get_arg (f->esp + 2*WORD_SIZE, f->esp);
-        check_arg(f->esp+WORD_SIZE,f->esp);
-        check_arg(f->esp+2*WORD_SIZE,f->esp);
-        f->eax = mmap(fd,arg);
-        break;
+	      	int fd = get_arg (f->esp + WORD_SIZE, f->esp);
+	      	int arg = get_arg (f->esp + 2*WORD_SIZE, f->esp);
+	        f->eax = mmap(fd,arg);
+	        break;
 	     }
 
 	    case SYS_MUNMAP:
@@ -220,7 +218,7 @@ syscall_handler (struct intr_frame *f UNUSED)
 	        munmap();
 	        break;
 	    }
-	    
+
 		// case SYS_CHDIR:
 		// {
 		// 	break;
@@ -520,12 +518,7 @@ sys_close (int fd)
 	file_close (f);
 }
 
-void munmap ()
-{
-  remove_mmap();
-}
-
-
+/* mmap all pages */
 int mmap (int fd, void *upage)
 {
   struct file_meta *fm = get_file(fd);
@@ -538,46 +531,53 @@ int mmap (int fd, void *upage)
   uint32_t read_bytes = file_length(file_reopened);
   int32_t ofs = 0;
   uint32_t curr_read_bytes;
+
   thread_current()->mmap_id++;
-  while (read_bytes > 0)
+
+  for(; read_bytes>0; read_bytes-=curr_read_bytes)
     {
     if (read_bytes<PGSIZE) 
     	curr_read_bytes = read_bytes;
     else 
     	curr_read_bytes = PGSIZE;
-    
-       if (!page_add_mmap(file_reopened, ofs, upage, curr_read_bytes, PGSIZE - curr_read_bytes))
-        {
-          munmap(thread_current()->mmap_id);
-          return -1;
-        }
-      upage += PGSIZE;
-      read_bytes -= curr_read_bytes;    	
-      ofs += curr_read_bytes;
+
+    struct spte *page = create_page(upage, PAL_USER, MMAP);
+	if(!page) {
+	 	munmap();
+	 	return -1;
+	}
+	page->file = file_reopened;
+	page->ofs = ofs;
+	page->read_bytes = curr_read_bytes;
+	page->zero_bytes = PGSIZE - curr_read_bytes;
+	page->swap_idx = ~LOADED;
+	page->mmap_id = thread_current()->mmap_id;
+	list_push_back(&thread_current()->mmap_list, &page->l_elem);
+      
+    upage += PGSIZE;
+    ofs += curr_read_bytes;
     }
   return thread_current()->mmap_id;
 }
 
-void remove_mmap ()
+void munmap ()
 {
   struct thread *curr = thread_current();
-  struct list_elem *next, *e = list_begin(&curr->mmap_list);
-  struct file *f = NULL;
-  while(!list_empty(&curr->mmap_list))
-  for (e = list_begin(&curr->mmap_list);
-       e != list_end(&curr->mmap_list); e = next)
+  struct list_elem *first, *next = list_begin(&curr->mmap_list);
+  for (first = list_begin(&curr->mmap_list);
+       first != list_end(&curr->mmap_list); first = next)
   {
-    struct mmap_file *mm = list_entry (e, struct mmap_file, elem);
-	if(!mm->spte->hash_error)
-         hash_delete(&curr->spt, &mm->spte->elem);
-      if (mm->spte)
+    struct spte *page = list_entry (first, struct spte, l_elem);
+	if(!page->hash_error)
+         hash_delete(&curr->spt, &page->elem);
+      if (page)
       {
-        if (pagedir_is_dirty(curr->pagedir, mm->spte->upage))
-          file_write_at(mm->spte->file, mm->spte->upage,
-              mm->spte->read_bytes, mm->spte->ofs);
+        if (pagedir_is_dirty(curr->pagedir, page->upage))
+          file_write_at(page->file, page->upage,
+              page->read_bytes, page->ofs);
       }
-      list_remove(&mm->elem);
-          next = list_next(e);
+      list_remove(&page->l_elem);
+          next = list_next(first);
   }
 }
 

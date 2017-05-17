@@ -218,7 +218,6 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
-  remove_mmap();
 
   /* If parent still exists and, in case parent waits for it 
      free the semaphore. NOTE: Parent sets the parent pointer
@@ -260,7 +259,10 @@ process_exit (void)
   /* Deallocate all the files meta information of current thread. */
   clear_files ();
 
+  /*Project 3*/
+  munmap();
   spt_destroy ();
+  
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;

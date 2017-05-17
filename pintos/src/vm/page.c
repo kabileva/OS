@@ -157,23 +157,4 @@ static void page_free_func (struct hash_elem *e,
 /*Creating mmap_file and initializing members of the structure; 
   Pushing mmap_file to the mmap_list of a current thread 
   Returns page with mmap if successful*/
-void *page_add_mmap(struct file *file, int32_t ofs, uint8_t *upage,
-                uint32_t read_bytes, uint32_t zero_bytes)
-{
-	struct spte *page = create_page(upage, PAL_USER, MMAP);
-	if(!page) 
-	 	return false;
-	page->file = file;
-	page->ofs = ofs;
-	page->read_bytes = read_bytes;
-	page->zero_bytes = zero_bytes;
-	page->swap_idx = ~LOADED;
-	struct mmap_file *mmap = malloc(sizeof(struct mmap_file));
-	mmap->mmap_id = thread_current()->mmap_id;
-	mmap->spte = page;
-	list_push_back(&thread_current()->mmap_list, &mmap->elem);
-	return page;
-}
-
-
 
