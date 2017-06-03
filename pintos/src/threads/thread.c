@@ -736,10 +736,12 @@ init_thread (struct thread *t, const char *name, int priority)
   t->priority = priority;
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
+
   list_init (&t->children);
   list_init (&t->files);  
-  t->fd = START_FD; 
-  list_init(&t->mmap_list);
+  t->fd = START_FD;
+
+  list_init (&t->spte_files);
   t->mmap_id = 0;
 }
 

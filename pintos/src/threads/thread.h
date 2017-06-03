@@ -113,11 +113,14 @@ struct thread
     struct file *execfile;              /* Pointer to its executable file. */
 #endif
 
-    struct hash spt;                  /* Corresponding SPTE pointer for current frame
+    struct hash spt;                    /* Corresponding SPTE pointer for current frame
                                            entry with all the information in SPTE. */
-       
-    int mmap_id;
-    struct list mmap_list;
+
+    int mmap_id;                        /* Integer that will be assigned to mmap files
+                                           as IDs. */
+    struct list spte_files;             /* List of SPTEs assigned for mmap files. */
+        
+    
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };

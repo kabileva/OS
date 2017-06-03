@@ -22,7 +22,6 @@
 
 #include "vm/page.h"
 #include "vm/frame.h"
-#include "userprog/syscall.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char **parsed_cmdline, 
@@ -218,7 +217,7 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
-
+  
   /* If parent still exists and, in case parent waits for it 
      free the semaphore. NOTE: Parent sets the parent pointer
      to NULL when terminates. */
@@ -259,10 +258,10 @@ process_exit (void)
   /* Deallocate all the files meta information of current thread. */
   clear_files ();
 
-  /*Project 3*/
-  munmap();
+  /* Clear all memory maped pages. Given -1 clears all pages. */
+  page_unmap (TID_ERROR);
+
   spt_destroy ();
-  
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;
@@ -522,7 +521,7 @@ bool
 install_page (void *upage, void *kpage, bool writable)
 {
   struct thread *t = thread_current ();
-//printf("installing\n");
+
   /* Verify that there's not already a page at that virtual
      address, then map our page there. */
   return (pagedir_get_page (t->pagedir, upage) == NULL
@@ -610,20 +609,24 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 
 #ifdef VM
 
+    // printf("create virtual page for process\n");
     /* Allocate a virtual page for current process of type file. */
-    struct spte *spte = create_page (upage, PAL_USER, FILE |writable);
+    struct spte *spte = create_page (upage, PAL_USER, writable | SWAP);
+
     /* Set the SPT entry with information about the file and file read
        offset position. */
-    spte->file = file;
-    spte->ofs = ofs;
-    spte->read_bytes = page_read_bytes;
-    spte->zero_bytes = page_zero_bytes;
+    // spte->file = file;
+    // spte->ofs = ofs;
+    // spte->read_bytes = page_read_bytes;
+    // spte->zero_bytes = page_zero_bytes;
+    
     /* Allocate physical frame. */
     struct frame_entry *fe = frame_alloc (spte);
 
     /* If allocation failed, return false. */
     if (fe == NULL)
       return false;
+    // printf("fe->kpage %p\n", fe->kpage);
 
     /* Copy file to memory. */
     if (file_read_at (file, fe->kpage, page_read_bytes, ofs)
@@ -632,6 +635,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       free_page (spte);
       return false;
     }
+    // printf("fe->kpage %p page_read_bytes %d page_zero_bytes %d fe->kpage + page_read_bytes %p\n", fe->kpage, page_read_bytes, page_zero_bytes, fe->kpage + page_read_bytes);
     memset (fe->kpage + page_read_bytes, 0, page_zero_bytes);
 
     if (!install_page (spte->upage, fe->kpage, spte->status & WRITABLE))
@@ -690,6 +694,7 @@ setup_stack (void **esp, const char **parsed_fn)
      other options. */
   spte = create_page (PHYS_BASE - PGSIZE, PAL_USER | PAL_ZERO, WRITABLE | SWAP);
   /* If SPT entry allocation success. */
+  // printf("setting up the stack spte %p with spte->upage %p\n", spte, spte->upage);
   if (spte != NULL) 
   {
     /* Load the page into the memory, i.e. link a frame to it. */
@@ -708,7 +713,9 @@ setup_stack (void **esp, const char **parsed_fn)
          esp. Store the address of esp into the argument address instead. */ 
       for (; temp > 0; temp--) {
         *esp -= (strlen (parsed_fn[temp]) + 1);
+        // printf("stack entry %s\n", parsed_fn[temp]);
         memcpy(*esp, parsed_fn[temp], strlen (parsed_fn[temp]) + 1);
+        // printf("stack address %p and its value %s\n", *esp, *esp);
         parsed_fn[temp] = (char *) *esp;
       }
 
@@ -740,7 +747,10 @@ setup_stack (void **esp, const char **parsed_fn)
       /* Push fake return address into the stack. */
       temp = 0;
       *esp -= sizeof (void *);
-      memcpy (*esp, &temp, sizeof (void *));      
+      memcpy (*esp, &temp, sizeof (void *));
+
+      // printf("success setting up the stack\n");
+      
       
       /* hex_dump ((uintptr_t) *esp, *esp, (unsigned) PHYS_BASE - (unsigned) *esp, true);
 

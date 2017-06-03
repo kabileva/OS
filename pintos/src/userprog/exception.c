@@ -152,7 +152,7 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
   // printf("exception with fault_addr %p PHYS_BASE %p in thread %s\n", fault_addr, PHYS_BASE, thread_name ());
- // printf("%d, %d, %d\n", not_present, write, user);
+
   // printf("not_present %d write %d user %d\n", not_present, write, user);
   if (not_present && fault_addr > ((void *) 0x08048000) &&
       is_user_vaddr (fault_addr))
@@ -168,14 +168,16 @@ page_fault (struct intr_frame *f)
       if (PHYS_BASE - fault_addr > MAX_STACK_SIZE)
         sys_exit (ERROR);
       spte = create_page (fault_addr, PAL_USER | PAL_ZERO, WRITABLE | SWAP);
-      // printf("exception.c: spte->swap_idx = LOADED;\n");
-      spte->swap_idx = LOADED;
     }
-     //printf("try loading page %p with spte->upage %p\n", spte, spte->upage);
+    // printf("try loading page %p with spte->upage %p\n", spte, spte->upage);
     if (spte && load_page (spte))
     {
-      
-     // printf("success loading page\n");
+      // if (fault_addr == (void *) 0x824b000)
+      // {
+      //   printf ("catched this shit, the value is %s\n", (void *) 0x824bd60);
+      //   printf("CHECK %p\n", *((void **) 0xbffffdd0));
+      // }
+      // printf("success loading page\n");
       return;
     }
     // printf("failed in loaing the page\n");
@@ -187,10 +189,8 @@ page_fault (struct intr_frame *f)
      current process with ERROR. NOTE: for future, there could
      be some modifications to this code part, since this will
      exit the process whenever there is a page fault. */
-
   if (user || !not_present)
     sys_exit (ERROR);
-  if(not_present) sys_exit (ERROR);
 
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to

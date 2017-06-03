@@ -5,6 +5,5 @@ void syscall_init (void);
 
 #define ERROR -1          /* Unsuccessful execution. */
 void sys_exit (int);
-void munmap ();
 
 #endif /* userprog/syscall.h */
