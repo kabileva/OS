@@ -67,7 +67,7 @@ static int cache_find_block(struct block* block, block_sector_t sector)
 }
 
 
-/*function for reading from the block */
+/*function for reading data of a given size from the block at offset*/
 void cache_read(struct block* block, block_sector_t sector, void* data, unsigned offset, int size)
 {
 	ASSERT(block != NULL);
@@ -86,7 +86,7 @@ void cache_read(struct block* block, block_sector_t sector, void* data, unsigned
 	lock_release(&cache[idx].lock);	
 }
 
-/*function for writing from the block */
+/*function for writing data of a given size from the block at offset*/
 
 void cache_write(struct block* block, block_sector_t sector, void* data, unsigned offset, int size)
 {
@@ -128,7 +128,7 @@ static int cache_evict()
 	while (ret == -1)
 	{
 		int i = 0;
-		/* try find empty block */
+		/* try to find empty block */
 		for(; i < 64; i++)
 		{
 			lock_acquire(&cache[i].lock);
@@ -145,7 +145,7 @@ static int cache_evict()
 			lock_acquire(&cache[i].lock);
 			if(cache[i].last_access_time < cache[ret].last_access_time)
 				{
-					/* release previously evicted */
+					/* release if evicted before */
 					lock_release(&cache[ret].lock);
 					ret = i;
 				} 

@@ -4,7 +4,6 @@
 
 #include "devices/block.h"
 
-// #define 64 64;
 
 enum cache_flags {
 	CLEAN = 0x00,
