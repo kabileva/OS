@@ -44,9 +44,11 @@ static int cache_find_block(struct block* block, block_sector_t sector)
 	/* evict another if not found */
 	
 	i = cache_evict();
+
 	/*save old block's values */
 	struct block* old_block = cache[i].block;
 	block_sector_t old_sector = cache[i].sector;
+
 	cache[i].block = block;
 		
 	if(cache[i].flags & DIRTY)
@@ -65,9 +67,7 @@ static int cache_find_block(struct block* block, block_sector_t sector)
 }
 
 
-/*
- * reads size bytes of data from the given block at offset.
- */
+/*function for reading from the block */
 void cache_read(struct block* block, block_sector_t sector, void* data, unsigned offset, int size)
 {
 	ASSERT(block != NULL);
@@ -75,20 +75,19 @@ void cache_read(struct block* block, block_sector_t sector, void* data, unsigned
 	ASSERT(offset + size <= BLOCK_SECTOR_SIZE);
 	/* Find block. Evict and store another if not found */
 	int idx = cache_find_block(block, sector);
-
-	cache[idx].last_access_time = timer_ticks();	// store time of the last access
+	/*time when last accessed */
+	cache[idx].last_access_time = timer_ticks();	
 
 	uint8_t* addr = (uint8_t*)((unsigned)(&cache[idx].data) + offset);
-	memcpy(data, addr, size);	// read data
+	memcpy(data, addr, size);	
 
 	cache[idx].flags |= ACCESSED;		
 
 	lock_release(&cache[idx].lock);	
 }
 
-/*
- * writes size bytes of data from the given block at offset.
- */
+/*function for writing from the block */
+
 void cache_write(struct block* block, block_sector_t sector, void* data, unsigned offset, int size)
 {
 
@@ -96,10 +95,10 @@ void cache_write(struct block* block, block_sector_t sector, void* data, unsigne
 	ASSERT(data != NULL);
 	ASSERT(offset + size <= BLOCK_SECTOR_SIZE);
 
-	/* the function is the same as cache_read. just we store data, rather than read it */
+	
 	int idx = cache_find_block(block, sector);
 
-	cache[idx].last_access_time = timer_ticks();	// reduce probability of waiting during eviction
+	cache[idx].last_access_time = timer_ticks();	
 
 	uint8_t* addr = (uint8_t*)((unsigned)(&cache[idx].data) + offset);
 	memcpy(addr, data, size);
